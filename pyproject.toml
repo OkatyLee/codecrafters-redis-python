@@ -3,3 +3,7 @@ name = "codecrafters-redis"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = []
+
+[tool.pytest.ini_options]
+addopts = "--cov=app --cov-report=term-missing --cov-report=term"
+asyncio_default_fixture_loop_scope = "function"
