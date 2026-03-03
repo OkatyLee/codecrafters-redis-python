@@ -57,3 +57,98 @@ def test_get_storage_returns_singleton_instance():
 		app.storage._storage_instance = original_instance
 
 
+# ---------- BLPOP tests ----------
+
+@pytest.mark.asyncio
+async def test_blpop_returns_immediately_when_list_has_elements():
+	storage = CacheStorage()
+	storage.lpush("mylist", b"a", b"b", b"c")
+
+	result = await storage.blpop("mylist", timeout=0)
+
+	assert result == ("mylist", b"c")
+
+
+@pytest.mark.asyncio
+async def test_blpop_returns_from_first_non_empty_key():
+	storage = CacheStorage()
+	storage.lpush("list2", b"val")
+
+	result = await storage.blpop("list1", "list2", timeout=0)
+
+	assert result == ("list2", b"val")
+
+
+@pytest.mark.asyncio
+async def test_blpop_returns_none_on_timeout():
+	storage = CacheStorage()
+
+	result = await storage.blpop("empty", timeout=0.1)
+
+	assert result is None
+
+
+@pytest.mark.asyncio
+async def test_blpop_blocks_until_push():
+	import asyncio
+
+	storage = CacheStorage()
+
+	async def push_later():
+		await asyncio.sleep(0.05)
+		storage.lpush("mylist", b"delayed")
+
+	task = asyncio.create_task(push_later())
+	result = await storage.blpop("mylist", timeout=2)
+
+	assert result == ("mylist", b"delayed")
+	await task
+
+
+@pytest.mark.asyncio
+async def test_blpop_multiple_keys_blocks_until_push():
+	import asyncio
+
+	storage = CacheStorage()
+
+	async def push_later():
+		await asyncio.sleep(0.05)
+		storage.rpush("key2", b"hello")
+
+	task = asyncio.create_task(push_later())
+	result = await storage.blpop("key1", "key2", timeout=2)
+
+	assert result == ("key2", b"hello")
+	await task
+
+
+@pytest.mark.asyncio
+async def test_blpop_no_timeout_blocks_until_push():
+	"""timeout=0 means block indefinitely; push unblocks it."""
+	import asyncio
+
+	storage = CacheStorage()
+
+	async def push_later():
+		await asyncio.sleep(0.05)
+		storage.lpush("k", b"x")
+
+	task = asyncio.create_task(push_later())
+	result = await storage.blpop("k", timeout=0)
+
+	assert result == ("k", b"x")
+	await task
+
+
+def test_lpop_does_not_destroy_remaining_elements():
+	"""Regression: lpop must not overwrite the list with popped values."""
+	storage = CacheStorage()
+	storage.rpush("mylist", b"a", b"b", b"c")
+
+	popped = storage.lpop("mylist")
+	assert popped == [b"a"]
+
+	remaining = storage.lrange("mylist", 0, -1)
+	assert remaining == [b"b", b"c"]
+
+
