@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import pytest
 
+from app.parser import RESPError
 from app.storage import CacheStorage
 
 
@@ -150,5 +151,90 @@ def test_lpop_does_not_destroy_remaining_elements():
 
 	remaining = storage.lrange("mylist", 0, -1)
 	assert remaining == [b"b", b"c"]
+
+
+@patch("app.types.time")
+def test_xadd_full_autogen_stream_id(mock_time):
+	storage = CacheStorage()
+	mock_time.return_value = 1710000000.123
+
+	stream_id = storage.xadd("mystream", "*", [b"field", b"value"])
+
+	assert stream_id == "1710000000123-0"
+
+
+@patch("app.types.time")
+def test_xadd_partial_autogen_stream_id(mock_time):
+	storage = CacheStorage()
+	mock_time.return_value = 1710000000.123
+
+	first_id = storage.xadd("mystream", "*", [b"field", b"v1"])
+	second_id = storage.xadd("mystream", "1710000000123-*", [b"field", b"v2"])
+
+	assert first_id == "1710000000123-0"
+	assert second_id == "1710000000123-1"
+
+
+def test_xadd_appends_entries_and_preserves_history():
+	storage = CacheStorage()
+
+	first_id = storage.xadd("mystream", "1-1", [b"f1", b"v1"])
+	second_id = storage.xadd("mystream", "1-2", [b"f2", b"v2"])
+
+	assert first_id == "1-1"
+	assert second_id == "1-2"
+
+	stream = storage.get("mystream")
+	assert stream is not None
+	assert stream["ID"] == "1-2"
+	assert stream["entries"] == [
+		("1-1", {b"f1": b"v1"}),
+		("1-2", {b"f2": b"v2"}),
+	]
+
+
+def test_xadd_rejects_equal_or_smaller_id_than_last():
+	storage = CacheStorage()
+	storage.xadd("mystream", "5-1", [b"field", b"v1"])
+
+	with pytest.raises(RESPError, match="equal or smaller"):
+		storage.xadd("mystream", "5-1", [b"field", b"v2"])
+
+	with pytest.raises(RESPError, match="equal or smaller"):
+		storage.xadd("mystream", "5-0", [b"field", b"v3"])
+
+
+def test_xadd_rejects_zero_zero_id():
+	storage = CacheStorage()
+
+	with pytest.raises(RESPError, match="greater than 0-0"):
+		storage.xadd("mystream", "0-0", [b"field", b"value"])
+
+
+def test_xadd_rejects_odd_number_of_payload_arguments():
+	storage = CacheStorage()
+
+	with pytest.raises(RESPError, match="wrong number of arguments"):
+		storage.xadd("mystream", "1-1", [b"field"])
+
+
+@patch("app.types.time")
+def test_xadd_full_autogen_keeps_monotonicity_when_time_goes_back(mock_time):
+	storage = CacheStorage()
+	mock_time.side_effect = [1710000000.123, 1700000000.000]
+
+	first_id = storage.xadd("mystream", "*", [b"field", b"v1"])
+	second_id = storage.xadd("mystream", "*", [b"field", b"v2"])
+
+	assert first_id == "1710000000123-0"
+	assert second_id == "1710000000123-1"
+
+
+def test_xadd_rejects_non_stream_key_type():
+	storage = CacheStorage()
+	storage.set("mystream", "plain-string")
+
+	with pytest.raises(TypeError, match="dictionary value"):
+		storage.xadd("mystream", "1-1", [b"field", b"value"])
 
 

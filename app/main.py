@@ -2,7 +2,7 @@ import asyncio
 from app.handlers import handle_client
 
 
-async def main():
+async def main() -> None:
     """Start the asyncio TCP server bound to localhost:6379.
 
     The function prints the bound address and then awaits
