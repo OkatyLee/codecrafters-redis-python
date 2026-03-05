@@ -155,6 +155,22 @@ class CacheStorage:
         Returns a list of (entry_id, entry) tuples.
         """
         return self._stream_type.xread_streams(keys, ids)
+    
+    def incr(self, key: RedisKey) -> int:
+        """
+        Increment the integer value stored at *key* by 1.
+        """
+        value = self.get(key)
+        if value is None:
+            self.set(key, b"1")
+            return 1
+        try:
+            value = int(value)
+        except (ValueError, TypeError):
+            raise TypeError("Value at key is not an integer")
+        value += 1
+        self.set(key, str(value).encode())
+        return value
 
 _storage_instance: CacheStorage | None = None
     

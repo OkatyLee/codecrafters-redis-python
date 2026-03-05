@@ -743,3 +743,192 @@ async def test_xread_rejects_non_stream_key_type_with_error_reply():
     await writer.wait_closed()
     server.close()
     await server.wait_closed()
+    
+    
+@pytest.mark.asyncio
+async def test_incr_command_with_correct_key():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    set_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$1\r\n5\r\n",
+    )
+    response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*2\r\n$4\r\nINCR\r\n$3\r\nkey\r\n",
+    )
+
+    assert set_response == b"+OK\r\n" 
+    assert response == b":6\r\n"
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+    
+    
+@pytest.mark.asyncio
+async def test_incr_command_with_unexising_key():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*2\r\n$4\r\nINCR\r\n$3\r\nkey\r\n",
+    )
+
+    assert response == b":1\r\n"
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+    
+@pytest.mark.asyncio
+async def test_incr_command_with_non_integer_value():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$6\r\nnotint\r\n",
+    )
+    response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*2\r\n$4\r\nINCR\r\n$3\r\nkey\r\n",
+    )
+    print(response)
+    assert response == b"-ERR Value at key is not an integer\r\n"
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_multi_exec_queues_and_executes_commands_in_order():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    multi_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*1\r\n$5\r\nMULTI\r\n",
+    )
+    queued_set_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n",
+    )
+    queued_get_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n",
+    )
+    exec_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*1\r\n$4\r\nEXEC\r\n",
+    )
+    get_after_exec_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n",
+    )
+
+    assert multi_response == b"+OK\r\n"
+    assert queued_set_response == b"+QUEUED\r\n"
+    assert queued_get_response == b"+QUEUED\r\n"
+    assert exec_response == b"*2\r\n+OK\r\n$3\r\nbar\r\n"
+    assert get_after_exec_response == b"$3\r\nbar\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_discard_clears_transaction_queue_without_applying_changes():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    multi_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*1\r\n$5\r\nMULTI\r\n",
+    )
+    queued_set_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n",
+    )
+    discard_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*1\r\n$7\r\nDISCARD\r\n",
+    )
+    get_after_discard_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n",
+    )
+
+    assert multi_response == b"+OK\r\n"
+    assert queued_set_response == b"+QUEUED\r\n"
+    assert discard_response == b"+OK\r\n"
+    assert get_after_discard_response == b"$-1\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_exec_without_multi_returns_error():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*1\r\n$4\r\nEXEC\r\n",
+    )
+
+    assert response == b"-ERR EXEC without MULTI\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_discard_without_multi_returns_error():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*1\r\n$7\r\nDISCARD\r\n",
+    )
+
+    assert response == b"-ERR DISCARD without MULTI\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
