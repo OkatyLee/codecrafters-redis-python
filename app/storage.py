@@ -64,6 +64,13 @@ class CacheStorage:
             return None
         return value
 
+    def delete(self, key: RedisKey) -> bool:
+        """Delete the key and return True if it existed, False otherwise."""
+        if key in self._storage:
+            del self._storage[key]
+            return True
+        return False
+
     def lpush(self, key: RedisKey, *values: bytes) -> int:
         """Push *values* to the head of the list stored at *key*.
 

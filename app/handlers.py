@@ -1,18 +1,60 @@
 import asyncio
 from collections.abc import Sequence
-
+from app.commands import COMMAND_WRITE_FLAGS, ExecCtx, redis_command
+from app.config import ServerConfig
 from app.parser import RESPError, RESPParser
 from app.storage import get_storage
 
+EMPTY_RDB_HEX = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2"
+EMPTY_RDB_BYTES = bytes.fromhex(EMPTY_RDB_HEX)
 
+
+def encode_command_as_resp_array(command: Sequence[bytes]) -> bytes:
+    payload = b"*" + str(len(command)).encode() + b"\r\n"
+    for item in command:
+        payload += b"$" + str(len(item)).encode() + b"\r\n" + item + b"\r\n"
+    return payload
+
+
+def build_exec_ctx(
+    command: Sequence[bytes],
+    config: ServerConfig | None,
+    *,
+    from_replication: bool,
+    replica_writer: asyncio.StreamWriter | None = None,
+) -> ExecCtx:
+    return ExecCtx(
+        from_replication=from_replication,
+        raw_resp_command=encode_command_as_resp_array(command),
+        propagate=lambda payload, cfg=config: propagate_to_replicas(cfg, payload),
+        replica_writer=replica_writer,
+    )
+
+
+async def propagate_to_replicas(config: ServerConfig | None, payload: bytes) -> None:
+    if config is None or config.role != "master" or not config.replica_writers:
+        return
+
+    config.increment_master_repl_offset(len(payload))
+
+    stale_writers: list[asyncio.StreamWriter] = []
+    for replica_writer in list(config.replica_writers):
+        try:
+            replica_writer.write(payload)
+            await replica_writer.drain()
+        except Exception:
+            stale_writers.append(replica_writer)
+
+    for stale_writer in stale_writers:
+        config.unregister_replica(stale_writer)
+        stale_writer.close()
+        await stale_writer.wait_closed()
+
+
+@redis_command(b"SET", is_write=True)
 def handle_set_command(key: bytes, value: bytes, ttl: int | float | None = None) -> bool:
-    """Handle the SET command logic."""
-    try:
-        storage = get_storage()
-        return storage.set(key, value, ttl)
-    except Exception as e:
-        print("Unexpected exception occured:", e)
-        return False
+    storage = get_storage()
+    return storage.set(key, value, ttl)
 
 
 def handle_get_command(key: bytes) -> bytes | None:
@@ -21,6 +63,7 @@ def handle_get_command(key: bytes) -> bytes | None:
     return storage.get(key)
 
 
+@redis_command(b"LPUSH", is_write=True)
 def handle_lpush_command(key: bytes, *values: bytes) -> int:
     """Insert *values* at the head of list *key* and return new length."""
     storage = get_storage()
@@ -33,12 +76,14 @@ def handle_llen_command(key: bytes) -> int:
     return storage.llen(key)
 
 
+@redis_command(b"LPOP", is_write=True)
 def handle_lpop_command(key: bytes, count: int | None = None) -> list[bytes] | None:
     """Pop one or more elements from the head of list *key*."""
     storage = get_storage()
     return storage.lpop(key, count)
 
 
+@redis_command(b"RPUSH", is_write=True)
 def handle_rpush_command(key: bytes, *values: bytes) -> int:
     """Append *values* to the tail of list *key* and return new length."""
     storage = get_storage()
@@ -93,6 +138,20 @@ def resolve_xread_start_ids(keys: Sequence[bytes], ids: Sequence[bytes]) -> list
     return resolved_ids
 
 
+def handle_info_command(args: list[bytes], config: ServerConfig | None = None) -> bytes:
+    del args
+    if config is None:
+        return b"Error: Config is None"
+    role = b"role:" + config.role.encode()
+    master_replid = (
+        b"master_replid:" + config.master_perlid.encode()
+        if config.master_perlid
+        else b"master_replid:"
+    )
+    master_repl_offset = b"master_repl_offset:" + str(config.master_repl_offset).encode()
+    return role + b"\r\n" + master_replid + b"\r\n" + master_repl_offset
+
+
 async def handle_blpop_command(*keys: bytes, timeout: float = 0) -> tuple[bytes, bytes] | None:
     """Async wrapper for storage.blpop."""
     if len(keys) < 1:
@@ -107,26 +166,88 @@ async def handle_blpop_command(*keys: bytes, timeout: float = 0) -> tuple[bytes,
     return key_payload, val_payload
 
 
+@redis_command(b"XADD", is_write=True)
 def handle_xadd_command(key: bytes, stream_id: bytes, payload: list[bytes]) -> str:
     """Handle the XADD command logic."""
     storage = get_storage()
     return storage.xadd(key, stream_id, payload)
 
 
+@redis_command(b"INCR", is_write=True)
 def handle_incr_command(key: bytes) -> int:
     """Increment the integer value stored at *key* by 1."""
     storage = get_storage()
     return storage.incr(key)
 
 
-def _normalize_command(data: list[bytes | str]) -> list[bytes]:
-    """Normalize parsed RESP array items to bytes for command dispatch."""
-    normalized: list[bytes] = []
-    for item in data:
-        if isinstance(item, bytes):
-            normalized.append(item)
-        else:
-            normalized.append(str(item).encode())
+@redis_command(b"DEL", is_write=True)
+def handle_del_command(key: bytes) -> bool:
+    storage = get_storage()
+    return storage.delete(key)
+
+
+
+def handle_replconf_getack_command(config: ServerConfig | None) -> int:
+    assert config is not None
+    return config.get_replica_offset()
+
+
+def handle_replconf_ack_command(
+    config: ServerConfig | None,
+    replica_writer: asyncio.StreamWriter | None,
+    offset: bytes,
+) -> None:
+    assert config is not None
+    config.set_replica_ack_offset(replica_writer, int(offset))
+
+
+async def handle_wait_command(config: ServerConfig, numreplicas: int, timeout: int) -> int:
+    replicas = config.get_replicas()
+
+    if numreplicas <= 0:
+        return 0
+
+    current_offset = config.master_repl_offset
+
+    # No writes propagated yet — all connected replicas are trivially in sync.
+    if current_offset == 0:
+        return len(replicas)
+
+    def count_acked() -> int:
+        return sum(
+            1 for r in config.get_replicas()
+            if config.replica_ack_offsets.get(r, -1) >= current_offset
+        )
+
+    if count_acked() >= numreplicas:
+        return count_acked()
+
+    # Send GETACK directly — bypassing propagate_to_replicas so that
+    # master_repl_offset is NOT inflated by this management command.
+    getack_cmd = encode_command_as_resp_array([b"REPLCONF", b"GETACK", b"*"])
+    stale: list[asyncio.StreamWriter] = []
+    for replica in list(replicas):
+        try:
+            replica.write(getack_cmd)
+            await replica.drain()
+        except Exception:
+            stale.append(replica)
+    for s in stale:
+        config.unregister_replica(s)
+
+    deadline = asyncio.get_event_loop().time() + timeout / 1000
+    while asyncio.get_event_loop().time() < deadline:
+        acked = count_acked()
+        if acked >= numreplicas:
+            return acked
+        await asyncio.sleep(0.01)
+
+    return count_acked()
+
+
+def _normalize_command(data: Sequence[object]) -> list[bytes]:
+    """Normalize parsed RESP array items to bytes and uppercase command name."""
+    normalized = [item if isinstance(item, bytes) else str(item).encode() for item in data]
     normalized[0] = normalized[0].upper()
     return normalized
 
@@ -136,8 +257,15 @@ def _encode_raw_resp_array(responses: Sequence[bytes]) -> bytes:
     return b"*" + str(len(responses)).encode() + b"\r\n" + b"".join(responses)
 
 
-async def _execute_command(command: list[bytes], parser: RESPParser) -> bytes:
-    """Execute a single command and return RESP-encoded response."""
+async def _execute_command(
+    command: list[bytes],
+    parser: RESPParser,
+    config: ServerConfig | None,
+    ctx: ExecCtx | None = None,
+) -> bytes:
+    if ctx is None:
+        ctx = build_exec_ctx(command, config, from_replication=False)
+
     response = b""
     try:
         match command:
@@ -158,10 +286,11 @@ async def _execute_command(command: list[bytes], parser: RESPParser) -> bytes:
                 if ex is not None:
                     ex = int(ex)
                 ttl = ex if ex is not None else px
-                if handle_set_command(key, value, ttl):
-                    response = parser.encode_simple_string("OK")
-                else:
-                    response = parser.encode_simple_error("Failed to set key")
+                response = (
+                    parser.encode_simple_string("OK")
+                    if handle_set_command(key, value, ttl)
+                    else parser.encode_simple_error("Failed to set key")
+                )
             case [b"GET", key]:
                 value = handle_get_command(key)
                 if value is not None:
@@ -169,6 +298,12 @@ async def _execute_command(command: list[bytes], parser: RESPParser) -> bytes:
                     response = parser.encode_bulk_string(payload)
                 else:
                     response = parser.encode_null()
+            case [b"DEL", key]:
+                response = (
+                    parser.encode_simple_string("OK")
+                    if handle_del_command(key)
+                    else parser.encode_simple_error("Failed to delete key")
+                )
             case [b"RPUSH", key, *values]:
                 if len(values) == 0:
                     raise ValueError("wrong number of arguments for 'rpush' command")
@@ -220,7 +355,6 @@ async def _execute_command(command: list[bytes], parser: RESPParser) -> bytes:
                     parse_index = 2
                 if parse_index >= len(args) or args[parse_index].upper() != b"STREAMS":
                     raise ValueError("syntax error")
-
                 keys_and_ids = args[parse_index + 1 :]
                 if len(keys_and_ids) == 0 or len(keys_and_ids) % 2 != 0:
                     raise ValueError("Unbalanced XREAD list of streams")
@@ -230,7 +364,6 @@ async def _execute_command(command: list[bytes], parser: RESPParser) -> bytes:
                 ids = keys_and_ids[split_index:]
                 resolved_ids = resolve_xread_start_ids(keys, ids)
                 entries = handle_xread_streams_command(keys, resolved_ids)
-
                 if entries:
                     response = parser.encode_array(entries)
                 elif block_timeout_seconds is None:
@@ -254,6 +387,34 @@ async def _execute_command(command: list[bytes], parser: RESPParser) -> bytes:
                         response = parser.encode_null()
             case [b"INCR", key]:
                 response = parser.encode_integer(handle_incr_command(key))
+            case [b"INFO", *args]:
+                response = parser.encode_bulk_string(handle_info_command(list(args), config))
+            case [b"REPLCONF", b"listening-port", replica_port]:
+                assert config is not None
+                config.register_replica(int(replica_port), None)
+                response = parser.encode_simple_string("OK")
+            case [b"REPLCONF", b"GETACK", *args]:
+                assert config is not None
+                del args
+                replica_offset = handle_replconf_getack_command(config)
+                response = parser.encode_array([b"REPLCONF", b"ACK", str(replica_offset).encode()])
+            case [b"REPLCONF", b"ACK", offset]:
+                assert config is not None
+                handle_replconf_ack_command(config, ctx.replica_writer, offset)
+                response = b""
+            case [b"REPLCONF", *_]:
+                response = parser.encode_simple_string("OK")
+            case [b"PSYNC", b"?", b"-1"]:
+                assert config is not None
+                config.register_replica(None, ctx.replica_writer)
+                repl_id = config.master_perlid
+                offset = config.master_repl_offset
+                response = parser.encode_simple_string(
+                    f"FULLRESYNC {repl_id} {offset}"
+                ) + parser.encode_bulk_string(EMPTY_RDB_BYTES)
+            case [b"WAIT", numreplicas, timeout]:
+                assert config is not None
+                response = parser.encode_integer(await handle_wait_command(config, int(numreplicas), int(timeout)))
             case [_, *_]:
                 response = parser.encode_simple_error("unknown command")
     except (ValueError, TypeError, RESPError, AssertionError) as e:
@@ -261,11 +422,19 @@ async def _execute_command(command: list[bytes], parser: RESPParser) -> bytes:
         if message.startswith("-ERR "):
             message = message[5:]
         response = parser.encode_simple_error(message)
+
+    is_write = COMMAND_WRITE_FLAGS.get(command[0], False)
+    if is_write and not ctx.from_replication and not response.startswith(b"-"):
+        await ctx.propagate(ctx.raw_resp_command)
+
     return response
 
 
-async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    """Async client connection handler implementing a small RESP server."""
+async def handle_client(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    config: ServerConfig | None = None,
+) -> None:
     addr = writer.get_extra_info("peername")
     print(f"Connected to client at {addr}")
     parser = RESPParser(reader)
@@ -281,6 +450,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 writer.write(response)
                 await writer.drain()
                 continue
+
             command = _normalize_command(data)
 
             match command:
@@ -298,9 +468,17 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         commands_to_execute = queued_commands.copy()
                         queued_commands.clear()
                         in_multi = False
-                        responses = []
+                        responses: list[bytes] = []
                         for queued in commands_to_execute:
-                            responses.append(await _execute_command(queued, parser))
+                            queued_ctx = build_exec_ctx(
+                                queued,
+                                config,
+                                from_replication=False,
+                                replica_writer=writer,
+                            )
+                            responses.append(
+                                await _execute_command(queued, parser, config, queued_ctx)
+                            )
                         response = _encode_raw_resp_array(responses)
                 case [b"DISCARD"]:
                     if not in_multi:
@@ -314,12 +492,20 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                         queued_commands.append(command)
                         response = parser.encode_simple_string("QUEUED")
                     else:
-                        response = await _execute_command(command, parser)
+                        ctx = build_exec_ctx(
+                            command,
+                            config,
+                            from_replication=False,
+                            replica_writer=writer,
+                        )
+                        response = await _execute_command(command, parser, config, ctx)
 
             writer.write(response)
             await writer.drain()
     except Exception as e:
         print(f"Error handling client: {e}")
     finally:
+        if config is not None and writer in config.replica_writers:
+            config.replica_writers.remove(writer)
         writer.close()
         await writer.wait_closed()

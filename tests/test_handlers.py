@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from app.config import ServerConfig
 from app.handlers import handle_client
 from app.parser import RESPParser
 
@@ -54,6 +55,14 @@ async def send_command_and_parse_response(
     await writer.drain()
     parser = RESPParser(reader)
     return await parser.parse()
+
+
+async def read_fullresync_and_rdb(reader: asyncio.StreamReader) -> tuple[bytes, bytes]:
+    first_line = await reader.readline()
+    bulk_header = await reader.readline()
+    length = int(bulk_header[1:-2])
+    payload = await reader.readexactly(length + 2)
+    return first_line, bulk_header + payload
 
 
 @pytest.mark.asyncio
@@ -930,5 +939,341 @@ async def test_discard_without_multi_returns_error():
 
     writer.close()
     await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_master_propagates_set_to_multiple_replicas():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handle_client_with_config(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handle_client_with_config, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    replica1_reader, replica1_writer = await asyncio.open_connection(*addr)
+    replica2_reader, replica2_writer = await asyncio.open_connection(*addr)
+    client_reader, client_writer = await asyncio.open_connection(*addr)
+
+    for replica_reader, replica_writer, port in (
+        (replica1_reader, replica1_writer, 6380),
+        (replica2_reader, replica2_writer, 6381),
+    ):
+        replconf_response = await send_command_and_read_response(
+            replica_reader,
+            replica_writer,
+            f"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${len(str(port))}\r\n{port}\r\n".encode(),
+        )
+        replica_writer.write(
+            b"*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n",
+        )
+        await replica_writer.drain()
+        fullresync_line, rdb_response = await read_fullresync_and_rdb(replica_reader)
+
+        assert replconf_response == b"+OK\r\n"
+        assert fullresync_line.startswith(b"+FULLRESYNC ")
+        assert rdb_response.startswith(b"$")
+
+    set_response = await send_command_and_read_response(
+        client_reader,
+        client_writer,
+        b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n",
+    )
+
+    replica1_command = await send_command_and_read_response(replica1_reader, replica1_writer, b"")
+    replica2_command = await send_command_and_read_response(replica2_reader, replica2_writer, b"")
+
+    assert set_response == b"+OK\r\n"
+    assert replica1_command == b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"
+    assert replica2_command == b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"
+
+    client_writer.close()
+    await client_writer.wait_closed()
+    replica1_writer.close()
+    await replica1_writer.wait_closed()
+    replica2_writer.close()
+    await replica2_writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+# ---------------------------------------------------------------------------
+# WAIT command tests
+# ---------------------------------------------------------------------------
+
+def _make_server_with_config(config: ServerConfig):
+    """Helper: start a server and return (server, addr)."""
+    import asyncio
+
+    async def _handle(reader, writer):
+        await handle_client(reader, writer, config)
+
+    return _handle
+
+
+async def _connect_replica(addr, config: ServerConfig) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    """Connect a replica via REPLCONF + PSYNC and return the (reader, writer) pair."""
+    reader, writer = await asyncio.open_connection(*addr)
+    # REPLCONF listening-port
+    writer.write(b"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n9999\r\n")
+    await writer.drain()
+    assert await reader.readline() == b"+OK\r\n"
+    # PSYNC
+    writer.write(b"*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n")
+    await writer.drain()
+    _, _ = await read_fullresync_and_rdb(reader)
+    return reader, writer
+
+
+@pytest.mark.asyncio
+async def test_wait_zero_numreplicas_returns_zero():
+    """WAIT 0 <timeout> should return 0 immediately."""
+    config = ServerConfig("127.0.0.1", 0)
+    server = await asyncio.start_server(_make_server_with_config(config), "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    client_reader, client_writer = await asyncio.open_connection(*addr)
+    response = await send_command_and_read_response(
+        client_reader, client_writer,
+        b"*3\r\n$4\r\nWAIT\r\n$1\r\n0\r\n$3\r\n500\r\n",
+    )
+    assert response == b":0\r\n"
+
+    client_writer.close()
+    await client_writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_wait_no_replicas_returns_zero():
+    """WAIT when no replicas are connected should return 0 immediately."""
+    config = ServerConfig("127.0.0.1", 0)
+    server = await asyncio.start_server(_make_server_with_config(config), "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    client_reader, client_writer = await asyncio.open_connection(*addr)
+    response = await send_command_and_read_response(
+        client_reader, client_writer,
+        b"*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$1\r\n0\r\n",
+    )
+    assert response == b":0\r\n"
+
+    client_writer.close()
+    await client_writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_wait_no_writes_returns_replica_count_immediately():
+    """If no writes have been made (offset=0), WAIT returns replica count right away."""
+    config = ServerConfig("127.0.0.1", 0)
+    server = await asyncio.start_server(_make_server_with_config(config), "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    replica_reader, replica_writer = await _connect_replica(addr, config)
+    client_reader, client_writer = await asyncio.open_connection(*addr)
+
+    response = await send_command_and_read_response(
+        client_reader, client_writer,
+        b"*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$3\r\n100\r\n",
+    )
+    assert response == b":1\r\n"
+
+    client_writer.close()
+    await client_writer.wait_closed()
+    replica_writer.close()
+    await replica_writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_wait_timeout_zero_no_ack_returns_zero():
+    """WAIT with timeout=0 and a write that has not been ACKed returns 0."""
+    config = ServerConfig("127.0.0.1", 0)
+    server = await asyncio.start_server(_make_server_with_config(config), "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    replica_reader, replica_writer = await _connect_replica(addr, config)
+    client_reader, client_writer = await asyncio.open_connection(*addr)
+
+    # Perform a write to advance master_repl_offset
+    set_resp = await send_command_and_read_response(
+        client_reader, client_writer,
+        b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n",
+    )
+    assert set_resp == b"+OK\r\n"
+
+    # Drain the SET command that was propagated to the replica
+    await replica_reader.readexactly(len(b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"))
+
+    # WAIT with timeout=0 — replica won't reply to GETACK in time
+    response = await send_command_and_read_response(
+        client_reader, client_writer,
+        b"*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$1\r\n0\r\n",
+    )
+    assert response == b":0\r\n"
+
+    client_writer.close()
+    await client_writer.wait_closed()
+    replica_writer.close()
+    await replica_writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_wait_replica_acks_in_time_returns_one():
+    """WAIT returns 1 when a replica sends ACK within the timeout."""
+    config = ServerConfig("127.0.0.1", 0)
+    server = await asyncio.start_server(_make_server_with_config(config), "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    replica_reader, replica_writer = await _connect_replica(addr, config)
+    client_reader, client_writer = await asyncio.open_connection(*addr)
+
+    set_cmd = b"*3\r\n$3\r\nSET\r\n$2\r\nfn\r\n$3\r\nbar\r\n"
+    set_resp = await send_command_and_read_response(client_reader, client_writer, set_cmd)
+    assert set_resp == b"+OK\r\n"
+
+    # Consume the propagated SET on the replica side
+    propagated_set = b"*3\r\n$3\r\nSET\r\n$2\r\nfn\r\n$3\r\nbar\r\n"
+    await replica_reader.readexactly(len(propagated_set))
+
+    async def replica_respond_to_getack():
+        """Read GETACK from master, reply with ACK carrying correct offset."""
+        resp_parser = RESPParser(replica_reader)
+        msg = await asyncio.wait_for(resp_parser.parse(), timeout=1)
+        assert msg == [b"REPLCONF", b"GETACK", b"*"]
+        # Replica ACKs with the number of bytes it received (SET cmd + GETACK cmd)
+        from app.handlers import encode_command_as_resp_array
+        set_len = len(encode_command_as_resp_array([b"SET", b"fn", b"bar"]))
+        getack_len = len(encode_command_as_resp_array([b"REPLCONF", b"GETACK", b"*"]))
+        ack_offset = set_len + getack_len
+        ack = encode_command_as_resp_array([b"REPLCONF", b"ACK", str(ack_offset).encode()])
+        replica_writer.write(ack)
+        await replica_writer.drain()
+
+    wait_task = asyncio.create_task(
+        send_command_and_read_response(
+            client_reader, client_writer,
+            b"*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$3\r\n500\r\n",
+        )
+    )
+    await asyncio.sleep(0.05)
+    await replica_respond_to_getack()
+
+    response = await asyncio.wait_for(wait_task, timeout=2)
+    assert response == b":1\r\n"
+
+    client_writer.close()
+    await client_writer.wait_closed()
+    replica_writer.close()
+    await replica_writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_wait_timeout_expires_when_replica_does_not_ack():
+    """WAIT returns 0 when replica ignores GETACK and timeout expires."""
+    config = ServerConfig("127.0.0.1", 0)
+    server = await asyncio.start_server(_make_server_with_config(config), "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    replica_reader, replica_writer = await _connect_replica(addr, config)
+    client_reader, client_writer = await asyncio.open_connection(*addr)
+
+    set_resp = await send_command_and_read_response(
+        client_reader, client_writer,
+        b"*3\r\n$3\r\nSET\r\n$1\r\nx\r\n$1\r\n1\r\n",
+    )
+    assert set_resp == b"+OK\r\n"
+
+    # Drain propagated SET but do NOT reply to GETACK
+    await replica_reader.readexactly(len(b"*3\r\n$3\r\nSET\r\n$1\r\nx\r\n$1\r\n1\r\n"))
+
+    # WAIT with 100 ms timeout — replica silent, should time out and return 0
+    response = await asyncio.wait_for(
+        send_command_and_read_response(
+            client_reader, client_writer,
+            b"*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$3\r\n100\r\n",
+        ),
+        timeout=2,
+    )
+    assert response == b":0\r\n"
+
+    client_writer.close()
+    await client_writer.wait_closed()
+    replica_writer.close()
+    await replica_writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_wait_two_replicas_only_one_acks():
+    """WAIT 2 500 returns 1 when only one of two replicas ACKs in time."""
+    config = ServerConfig("127.0.0.1", 0)
+    server = await asyncio.start_server(_make_server_with_config(config), "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    replica1_reader, replica1_writer = await _connect_replica(addr, config)
+    replica2_reader, replica2_writer = await _connect_replica(addr, config)
+    client_reader, client_writer = await asyncio.open_connection(*addr)
+
+    set_cmd_raw = b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\nb\r\n"
+    set_resp = await send_command_and_read_response(client_reader, client_writer, set_cmd_raw)
+    assert set_resp == b"+OK\r\n"
+
+    # Both replicas drain the propagated SET
+    propagated = b"*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\nb\r\n"
+    await replica1_reader.readexactly(len(propagated))
+    await replica2_reader.readexactly(len(propagated))
+
+    from app.handlers import encode_command_as_resp_array
+
+    async def replica1_acks():
+        parser = RESPParser(replica1_reader)
+        msg = await asyncio.wait_for(parser.parse(), timeout=1)
+        assert msg == [b"REPLCONF", b"GETACK", b"*"]
+        set_len = len(encode_command_as_resp_array([b"SET", b"a", b"b"]))
+        getack_len = len(encode_command_as_resp_array([b"REPLCONF", b"GETACK", b"*"]))
+        ack = encode_command_as_resp_array(
+            [b"REPLCONF", b"ACK", str(set_len + getack_len).encode()]
+        )
+        replica1_writer.write(ack)
+        await replica1_writer.drain()
+
+    # Replica 2 reads GETACK but never replies
+    async def replica2_ignores():
+        parser = RESPParser(replica2_reader)
+        await asyncio.wait_for(parser.parse(), timeout=1)  # consume GETACK
+
+    wait_task = asyncio.create_task(
+        send_command_and_read_response(
+            client_reader, client_writer,
+            b"*3\r\n$4\r\nWAIT\r\n$1\r\n2\r\n$3\r\n300\r\n",
+        )
+    )
+    await asyncio.sleep(0.05)
+    await asyncio.gather(replica1_acks(), replica2_ignores())
+
+    response = await asyncio.wait_for(wait_task, timeout=2)
+    assert response == b":1\r\n"
+
+    client_writer.close()
+    await client_writer.wait_closed()
+    replica1_writer.close()
+    await replica1_writer.wait_closed()
+    replica2_writer.close()
+    await replica2_writer.wait_closed()
     server.close()
     await server.wait_closed()
