@@ -1,4 +1,5 @@
 import asyncio
+from collections import defaultdict
 from random import randint
 
 
@@ -17,6 +18,8 @@ class ServerConfig:
         self.replicas_ports: list[int] = []
         self.replica_writers: list[asyncio.StreamWriter] = []
         self.replica_ack_offsets: dict[asyncio.StreamWriter, int] = {}
+        # channel -> set of subscribed writers
+        self.pubsub: defaultdict[bytes, set[asyncio.StreamWriter]] = defaultdict(set)
 
     def register_replica(self, port: int | None, writer: asyncio.StreamWriter | None) -> None:
         if port is not None and port not in self.replicas_ports:

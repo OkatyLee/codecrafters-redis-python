@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Sequence
 import os
+from app import config
 from app.commands import COMMAND_WRITE_FLAGS, ExecCtx, redis_command
 from app.config import ServerConfig
 from app.parser import RESPError, RESPParser
@@ -260,6 +261,20 @@ async def handle_bgsave_command(config: ServerConfig) -> str:
     return "Background saving started"
 
 
+async def handle_publish_command(config: ServerConfig, channel: bytes, message: bytes) -> int:
+    """Publish *message* to all subscribers of *channel*.
+
+    Returns the number of clients that received the message.
+    """
+    subscribers = list(config.pubsub.get(channel, set()))
+    if subscribers:
+        payload = encode_command_as_resp_array([b"message", channel, message])
+        for sub_writer in subscribers:
+            if not sub_writer.is_closing():
+                sub_writer.write(payload)
+    return len(subscribers)
+
+
 def handle_keys_command(pattern: bytes = b"*") -> list[bytes]:
     """Return all keys in storage matching *pattern* (Redis glob syntax)."""
     storage = get_storage()
@@ -458,6 +473,10 @@ async def _execute_command(
                 assert config is not None
                 asyncio.create_task(handle_bgsave_command(config))
                 response = parser.encode_simple_string("Background saving started")
+            case [b"PUBLISH", channel, message]:
+                assert config is not None
+                count = await handle_publish_command(config, channel, message)
+                response = parser.encode_integer(count)
             case [_, *_]:
                 response = parser.encode_simple_error("unknown command")
     except (ValueError, TypeError, RESPError, AssertionError) as e:
@@ -483,6 +502,8 @@ async def handle_client(
     parser = RESPParser(reader)
     in_multi = False
     queued_commands: list[list[bytes]] = []
+    in_subscribe_mode = False
+    subscribed_channels: set[bytes] = set()
     try:
         while True:
             data = await parser.parse()
@@ -530,8 +551,43 @@ async def handle_client(
                         queued_commands.clear()
                         in_multi = False
                         response = parser.encode_simple_string("OK")
+                case [b"SUBSCRIBE", *channels]:
+                    assert config is not None
+                    if not channels:
+                        response = parser.encode_simple_error("wrong number of arguments for 'subscribe' command")
+                    else:
+                        combined = b""
+                        for channel in channels:
+                            ch = channel if isinstance(channel, bytes) else str(channel).encode()
+                            config.pubsub[ch].add(writer)
+                            subscribed_channels.add(ch)
+                            combined += parser.encode_array([b"subscribe", ch, len(subscribed_channels)])
+                        in_subscribe_mode = True
+                        response = combined
+                case [b"UNSUBSCRIBE", *channels]:
+                    assert config is not None
+                    targets = (
+                        [c if isinstance(c, bytes) else str(c).encode() for c in channels]
+                        if channels else list(subscribed_channels)
+                    )
+                    combined = b""
+                    for ch in targets:
+                        subscribed_channels.discard(ch)
+                        config.pubsub[ch].discard(writer)
+                        combined += parser.encode_array([b"unsubscribe", ch, len(subscribed_channels)])
+                    if not subscribed_channels:
+                        in_subscribe_mode = False
+                    response = combined if combined else parser.encode_array([b"unsubscribe", None, 0])
                 case _:
-                    if in_multi:
+                    if in_subscribe_mode:
+                        if command[0] == b"PING":
+                            msg = command[1] if len(command) > 1 else b""
+                            response = parser.encode_array([b"pong", msg])
+                        else:
+                            response = parser.encode_simple_error(
+                                "ERR Command not allowed in subscribe mode"
+                            )
+                    elif in_multi:  
                         queued_commands.append(command)
                         response = parser.encode_simple_string("QUEUED")
                     else:
@@ -548,7 +604,10 @@ async def handle_client(
     except Exception as e:
         print(f"Error handling client: {e}")
     finally:
-        if config is not None and writer in config.replica_writers:
-            config.replica_writers.remove(writer)
+        if config is not None:
+            if writer in config.replica_writers:
+                config.replica_writers.remove(writer)
+            for ch in subscribed_channels:
+                config.pubsub[ch].discard(writer)
         writer.close()
         await writer.wait_closed()

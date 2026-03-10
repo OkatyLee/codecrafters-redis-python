@@ -59,6 +59,18 @@ async def send_command_and_parse_response(
     return await parser.parse()
 
 
+async def send_command_and_parse_n_responses(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    command: bytes,
+    count: int,
+):
+    writer.write(command)
+    await writer.drain()
+    parser = RESPParser(reader)
+    return [await parser.parse() for _ in range(count)]
+
+
 async def read_fullresync_and_rdb(reader: asyncio.StreamReader) -> tuple[bytes, bytes]:
     first_line = await reader.readline()
     bulk_header = await reader.readline()
@@ -1415,6 +1427,167 @@ async def test_handle_keys_no_match_returns_empty_array():
     response = await send_command_and_parse_response(reader, writer, b"*2\r\n$4\r\nKEYS\r\n$4\r\nnope\r\n")
 
     assert response == []
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_returns_confirmation_array():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    response = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*2\r\n$9\r\nSUBSCRIBE\r\n$3\r\nch1\r\n",
+    )
+
+    assert response == [b"subscribe", b"ch1", 1]
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_publish_delivers_message_to_subscriber_and_returns_count():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    sub_reader, sub_writer = await asyncio.open_connection(*addr)
+    pub_reader, pub_writer = await asyncio.open_connection(*addr)
+
+    subscribe_response = await send_command_and_parse_response(
+        sub_reader,
+        sub_writer,
+        b"*2\r\n$9\r\nSUBSCRIBE\r\n$3\r\nch1\r\n",
+    )
+    publish_response = await send_command_and_parse_response(
+        pub_reader,
+        pub_writer,
+        b"*3\r\n$7\r\nPUBLISH\r\n$3\r\nch1\r\n$5\r\nhello\r\n",
+    )
+    pushed_message = await RESPParser(sub_reader).parse()
+
+    assert subscribe_response == [b"subscribe", b"ch1", 1]
+    assert publish_response == 1
+    assert pushed_message == [b"message", b"ch1", b"hello"]
+
+    sub_writer.close()
+    await sub_writer.wait_closed()
+    pub_writer.close()
+    await pub_writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_ping_allowed_in_subscribe_mode():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    subscribe_response = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*2\r\n$9\r\nSUBSCRIBE\r\n$3\r\nch1\r\n",
+    )
+    ping_response = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*2\r\n$4\r\nPING\r\n$3\r\nhey\r\n",
+    )
+
+    assert subscribe_response == [b"subscribe", b"ch1", 1]
+    assert ping_response == [b"pong", b"hey"]
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_regular_command_blocked_in_subscribe_mode():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    subscribe_response = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*2\r\n$9\r\nSUBSCRIBE\r\n$3\r\nch1\r\n",
+    )
+    blocked_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n",
+    )
+
+    assert subscribe_response == [b"subscribe", b"ch1", 1]
+    assert blocked_response == b"-ERR Command not allowed in subscribe mode\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_exits_subscribe_mode_and_restores_normal_ping():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    subscribe_response = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*2\r\n$9\r\nSUBSCRIBE\r\n$3\r\nch1\r\n",
+    )
+    unsubscribe_response = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*1\r\n$11\r\nUNSUBSCRIBE\r\n",
+    )
+    ping_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*1\r\n$4\r\nPING\r\n",
+    )
+
+    assert subscribe_response == [b"subscribe", b"ch1", 1]
+    assert unsubscribe_response == [b"unsubscribe", b"ch1", 0]
+    assert ping_response == b"+PONG\r\n"
 
     writer.close()
     await writer.wait_closed()
