@@ -3,11 +3,13 @@ from random import randint
 
 
 class ServerConfig:
-    def __init__(self, host: str, port: int, replicaof: str | None = None):
+    def __init__(self, host: str, port: int, replicaof: str | None = None, dir: str = "tmp/files", dbfilename: str = "dump.rdb"):
         self.host = host
         self.port = port
         self.replicaof = replicaof
         self.role = "master" if replicaof is None else "slave"
+        self.dir = dir
+        self.dbfilename = dbfilename
         abc = '1234567890abcdefghijklmnopqrstuvwxyz'
         self.master_perlid = ''.join(abc[randint(0, len(abc) - 1)] for _ in range(40))
         self.master_repl_offset = 0

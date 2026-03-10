@@ -1,4 +1,7 @@
 from unittest.mock import patch
+import os
+import tempfile
+import time as time_module
 
 import pytest
 
@@ -237,4 +240,193 @@ def test_xadd_rejects_non_stream_key_type():
 	with pytest.raises(TypeError, match="dictionary value"):
 		storage.xadd("mystream", "1-1", [b"field", b"value"])
 
+
+# ---------- RDB save / load tests ----------
+
+def test_save_creates_rdb_file():
+	storage = CacheStorage()
+	storage.set(b"key1", b"value1")
+	storage.set(b"key2", b"value2")
+
+	with tempfile.TemporaryDirectory() as tmpdir:
+		result = storage.save(tmpdir, "test.rdb")
+
+		assert result is True
+		assert os.path.exists(os.path.join(tmpdir, "test.rdb"))
+
+
+def test_save_and_load_roundtrip():
+	storage = CacheStorage()
+	storage.set(b"hello", b"world")
+	storage.set(b"foo", b"bar")
+
+	with tempfile.TemporaryDirectory() as tmpdir:
+		storage.save(tmpdir, "dump.rdb")
+
+		storage2 = CacheStorage()
+		result = storage2.load(tmpdir, "dump.rdb")
+
+		assert result is True
+		assert storage2.get(b"hello") == b"world"
+		assert storage2.get(b"foo") == b"bar"
+
+
+@patch("app.storage.monotonic")
+@patch("app.storage._time_module")
+def test_save_and_load_with_expiry(mock_time_module, mock_monotonic):
+	mock_monotonic.return_value = 1000.0
+	mock_time_module.time.return_value = 2000.0
+
+	storage = CacheStorage()
+	storage.set(b"persistent", b"stays")
+	storage.set(b"expiring", b"fades", ttl=60.0)
+
+	with tempfile.TemporaryDirectory() as tmpdir:
+		storage.save(tmpdir, "dump.rdb")
+
+		# Load when key is still valid (40s have passed)
+		mock_monotonic.return_value = 1040.0
+		mock_time_module.time.return_value = 2040.0
+
+		storage2 = CacheStorage()
+		storage2.load(tmpdir, "dump.rdb")
+
+		assert storage2.get(b"persistent") == b"stays"
+		assert storage2.get(b"expiring") == b"fades"
+
+
+@patch("app.storage.monotonic")
+@patch("app.storage._time_module")
+def test_load_skips_already_expired_keys(mock_time_module, mock_monotonic):
+	mock_monotonic.return_value = 1000.0
+	mock_time_module.time.return_value = 2000.0
+
+	storage = CacheStorage()
+	storage.set(b"short", b"lived", ttl=10.0)
+
+	with tempfile.TemporaryDirectory() as tmpdir:
+		storage.save(tmpdir, "dump.rdb")
+
+		# Load 20s later — key has expired
+		mock_monotonic.return_value = 1020.0
+		mock_time_module.time.return_value = 2020.0
+
+		storage2 = CacheStorage()
+		storage2.load(tmpdir, "dump.rdb")
+
+		assert storage2.get(b"short") is None
+
+
+def test_load_returns_false_when_file_missing():
+	storage = CacheStorage()
+
+	with tempfile.TemporaryDirectory() as tmpdir:
+		result = storage.load(tmpdir, "nonexistent.rdb")
+
+	assert result is False
+
+
+def test_save_does_not_include_expired_keys():
+	storage = CacheStorage()
+	storage.set(b"alive", b"yes")
+
+	# Manually insert an already-expired record
+	from time import monotonic
+	storage._storage[b"dead"] = (b"no", monotonic() - 1)
+
+	with tempfile.TemporaryDirectory() as tmpdir:
+		storage.save(tmpdir, "dump.rdb")
+
+		storage2 = CacheStorage()
+		storage2.load(tmpdir, "dump.rdb")
+
+		assert storage2.get(b"alive") == b"yes"
+		assert storage2.get(b"dead") is None
+
+
+def test_save_overwrites_existing_file():
+	storage = CacheStorage()
+	storage.set(b"k", b"v1")
+
+	with tempfile.TemporaryDirectory() as tmpdir:
+		storage.save(tmpdir, "dump.rdb")
+		size1 = os.path.getsize(os.path.join(tmpdir, "dump.rdb"))
+
+		storage.set(b"k2", b"v2")
+		storage.save(tmpdir, "dump.rdb")
+		size2 = os.path.getsize(os.path.join(tmpdir, "dump.rdb"))
+
+		assert size2 > size1
+
+
+# ---------- KEYS tests ----------
+
+def test_keys_star_returns_all_keys():
+	storage = CacheStorage()
+	storage.set(b"hello", b"world")
+	storage.set(b"foo", b"bar")
+	storage.set(b"foobar", b"baz")
+
+	result = set(storage.keys(b"*"))
+
+	assert result == {b"hello", b"foo", b"foobar"}
+
+
+def test_keys_prefix_glob():
+	storage = CacheStorage()
+	storage.set(b"foo", b"1")
+	storage.set(b"foobar", b"2")
+	storage.set(b"bar", b"3")
+
+	result = set(storage.keys(b"foo*"))
+
+	assert result == {b"foo", b"foobar"}
+
+
+def test_keys_question_mark_glob():
+	storage = CacheStorage()
+	storage.set(b"hallo", b"1")
+	storage.set(b"hxllo", b"2")
+	storage.set(b"hello", b"3")
+	storage.set(b"hllo", b"4")
+
+	result = set(storage.keys(b"h?llo"))
+
+	assert result == {b"hallo", b"hxllo", b"hello"}
+
+
+def test_keys_character_class_glob():
+	storage = CacheStorage()
+	storage.set(b"hallo", b"1")
+	storage.set(b"hello", b"2")
+	storage.set(b"hillo", b"3")
+
+	result = set(storage.keys(b"h[ae]llo"))
+
+	assert result == {b"hallo", b"hello"}
+
+
+def test_keys_excludes_expired():
+	from time import monotonic
+	storage = CacheStorage()
+	storage.set(b"alive", b"yes")
+	storage._storage[b"dead"] = (b"no", monotonic() - 1)
+
+	result = storage.keys(b"*")
+
+	assert b"alive" in result
+	assert b"dead" not in result
+
+
+def test_keys_empty_storage():
+	storage = CacheStorage()
+
+	assert storage.keys(b"*") == []
+
+
+def test_keys_no_match_returns_empty():
+	storage = CacheStorage()
+	storage.set(b"hello", b"world")
+
+	assert storage.keys(b"xyz*") == []
 

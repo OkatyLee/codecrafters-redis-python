@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Sequence
+import os
 from app.commands import COMMAND_WRITE_FLAGS, ExecCtx, redis_command
 from app.config import ServerConfig
 from app.parser import RESPError, RESPParser
@@ -245,6 +246,25 @@ async def handle_wait_command(config: ServerConfig, numreplicas: int, timeout: i
     return count_acked()
 
 
+def handle_save_command(config: ServerConfig) -> bool:
+    """Handle the SAVE command logic."""
+    storage = get_storage()
+    return storage.save(config.dir, config.dbfilename)
+
+
+async def handle_bgsave_command(config: ServerConfig) -> str:
+    """Handle the BGSAVE command: save RDB in the background."""
+    loop = asyncio.get_running_loop()
+    storage = get_storage()
+    await loop.run_in_executor(None, storage.save, config.dir, config.dbfilename)
+    return "Background saving started"
+
+
+def handle_keys_command(pattern: bytes = b"*") -> list[bytes]:
+    """Return all keys in storage matching *pattern* (Redis glob syntax)."""
+    storage = get_storage()
+    return storage.keys(pattern)
+
 def _normalize_command(data: Sequence[object]) -> list[bytes]:
     """Normalize parsed RESP array items to bytes and uppercase command name."""
     normalized = [item if isinstance(item, bytes) else str(item).encode() for item in data]
@@ -409,12 +429,35 @@ async def _execute_command(
                 config.register_replica(None, ctx.replica_writer)
                 repl_id = config.master_perlid
                 offset = config.master_repl_offset
+                rdb_path = os.path.join(config.dir, config.dbfilename)
+
+                if os.path.exists(rdb_path):
+                    with open(rdb_path, "rb") as f:
+                        rdb_data = f.read()
+                else:
+                    rdb_data = EMPTY_RDB_BYTES
+                if rdb_data == EMPTY_RDB_BYTES:
+                    print("RDB files not found. Using empty RDB data")
                 response = parser.encode_simple_string(
                     f"FULLRESYNC {repl_id} {offset}"
-                ) + parser.encode_bulk_string(EMPTY_RDB_BYTES)
+                ) + parser.encode_bulk_string(rdb_data)
             case [b"WAIT", numreplicas, timeout]:
                 assert config is not None
                 response = parser.encode_integer(await handle_wait_command(config, int(numreplicas), int(timeout)))
+            case [b"CONFIG", arg1, arg2]:
+                assert arg1.upper() == b'GET'
+                assert hasattr(config, arg2.decode())
+                response = parser.encode_array([arg2, getattr(config, arg2.decode()).encode()])
+            case [b"SAVE"]:
+                assert config is not None
+                is_success = handle_save_command(config)
+                response = parser.encode_simple_string("OK") if is_success else parser.encode_simple_error("Error saving data")
+            case [b"KEYS", pattern]:
+                response = parser.encode_array(handle_keys_command(pattern))
+            case [b"BGSAVE"]:
+                assert config is not None
+                asyncio.create_task(handle_bgsave_command(config))
+                response = parser.encode_simple_string("Background saving started")
             case [_, *_]:
                 response = parser.encode_simple_error("unknown command")
     except (ValueError, TypeError, RESPError, AssertionError) as e:

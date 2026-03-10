@@ -1,4 +1,6 @@
 import asyncio
+import os
+import tempfile
 
 import pytest
 
@@ -1277,3 +1279,146 @@ async def test_wait_two_replicas_only_one_acks():
     await replica2_writer.wait_closed()
     server.close()
     await server.wait_closed()
+
+
+# ---------- SAVE / BGSAVE handler tests ----------
+
+@pytest.mark.asyncio
+async def test_handle_save_command_returns_ok():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = ServerConfig("127.0.0.1", 6379, dir=tmpdir, dbfilename="test.rdb")
+
+        async def handler(reader, writer):
+            await handle_client(reader, writer, config)
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        addr = server.sockets[0].getsockname()
+
+        reader, writer = await asyncio.open_connection(*addr)
+        response = await send_command_and_read_response(reader, writer, b"*1\r\n$4\r\nSAVE\r\n")
+
+        assert response == b"+OK\r\n"
+        assert os.path.exists(os.path.join(tmpdir, "test.rdb"))
+
+        writer.close()
+        await writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_handle_save_persists_and_load_restores():
+    import app.storage
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = ServerConfig("127.0.0.1", 6379, dir=tmpdir, dbfilename="test.rdb")
+
+        async def handler(reader, writer):
+            await handle_client(reader, writer, config)
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        addr = server.sockets[0].getsockname()
+
+        reader, writer = await asyncio.open_connection(*addr)
+        await send_command_and_read_response(reader, writer, b"*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n")
+        await send_command_and_read_response(reader, writer, b"*1\r\n$4\r\nSAVE\r\n")
+
+        writer.close()
+        await writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+
+        # Reset singleton and load from the saved RDB
+        original = app.storage._storage_instance
+        app.storage._storage_instance = None
+        try:
+            storage = app.storage.get_storage()
+            storage.load(tmpdir, "test.rdb")
+            assert storage.get(b"hello") == b"world"
+        finally:
+            app.storage._storage_instance = original
+
+
+@pytest.mark.asyncio
+async def test_handle_bgsave_command_returns_background_saving_started():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = ServerConfig("127.0.0.1", 6379, dir=tmpdir, dbfilename="bg.rdb")
+
+        async def handler(reader, writer):
+            await handle_client(reader, writer, config)
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        addr = server.sockets[0].getsockname()
+
+        reader, writer = await asyncio.open_connection(*addr)
+        response = await send_command_and_read_response(reader, writer, b"*1\r\n$6\r\nBGSAVE\r\n")
+
+        assert response == b"+Background saving started\r\n"
+        await asyncio.sleep(0.1)
+        assert os.path.exists(os.path.join(tmpdir, "bg.rdb"))
+
+        writer.close()
+        await writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+
+
+# ---------- KEYS handler tests ----------
+
+@pytest.mark.asyncio
+async def test_handle_keys_star_returns_all_keys():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    await send_command_and_parse_response(reader, writer, b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n1\r\n")
+    await send_command_and_parse_response(reader, writer, b"*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n2\r\n")
+
+    response = await send_command_and_parse_response(reader, writer, b"*2\r\n$4\r\nKEYS\r\n$1\r\n*\r\n")
+
+    assert isinstance(response, list)
+    assert set(response) == {b"foo", b"bar"}
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_handle_keys_pattern_filters():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    await send_command_and_parse_response(reader, writer, b"*3\r\n$3\r\nSET\r\n$6\r\nfoobar\r\n$1\r\n1\r\n")
+    await send_command_and_parse_response(reader, writer, b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$1\r\n2\r\n")
+    await send_command_and_parse_response(reader, writer, b"*3\r\n$3\r\nSET\r\n$3\r\nbar\r\n$1\r\n3\r\n")
+
+    response = await send_command_and_parse_response(reader, writer, b"*2\r\n$4\r\nKEYS\r\n$4\r\nfoo*\r\n")
+
+    assert isinstance(response, list)
+    assert set(response) == {b"foobar", b"foo"}
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_handle_keys_no_match_returns_empty_array():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    response = await send_command_and_parse_response(reader, writer, b"*2\r\n$4\r\nKEYS\r\n$4\r\nnope\r\n")
+
+    assert response == []
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+

@@ -4,6 +4,7 @@ import asyncio
 from app.config import ServerConfig
 from app.handlers import _execute_command, build_exec_ctx, encode_command_as_resp_array, handle_client
 from app.parser import RESPParser
+from app.storage import get_storage
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +29,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Run as a replica server of the specified master",
     )
+    parser.add_argument(
+        "--dir",
+        default="./tmp/files",
+        help="Directory to store data",
+    )
+    parser.add_argument(
+        "--dbfilename",
+        default="dump.rdb",
+        help="Filename to store database dump",
+    )
 
     return parser.parse_args()
 
@@ -35,7 +46,10 @@ def parse_args() -> argparse.Namespace:
 async def main() -> None:
     """Start server and, if needed, establish replica handshake."""
     args = parse_args()
-    config = ServerConfig(args.host, args.port, args.replicaof)
+    config = ServerConfig(args.host, args.port, args.replicaof, args.dir, args.dbfilename)
+
+    # Load persisted data from RDB file if it exists
+    get_storage().load(config.dir, config.dbfilename)
 
     if config.replicaof:
         try:
@@ -114,9 +128,8 @@ async def replication_handshake_and_loop(
         if not isinstance(rdb_payload, bytes):
             print("Received invalid RDB payload from master")
             return
-
-        print("Replication handshake completed successfully")
-
+        is_success = get_storage().load(config.dir, config.dbfilename, rdb_payload)
+        print("Replication handshake completed successfully" if is_success else "Unexpected error during handshake")
         while True:
             data = await parser.parse()
             if data is None:

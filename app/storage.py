@@ -1,4 +1,8 @@
 import asyncio
+import fnmatch
+import os
+import struct
+import time as _time_module
 from collections.abc import Sequence
 from collections import defaultdict
 from time import monotonic
@@ -178,6 +182,198 @@ class CacheStorage:
         value += 1
         self.set(key, str(value).encode())
         return value
+    
+    def keys(self, pattern: str | bytes = b"*") -> list[bytes]:
+        """Return all non-expired keys matching *pattern* (Redis glob syntax)."""
+        pat_str: str = pattern.decode(errors="replace") if isinstance(pattern, bytes) else str(pattern)
+        now = monotonic()
+        result: list[bytes] = []
+        for key, (_, expire_at) in list(self._storage.items()):
+            if expire_at is not None and expire_at < now:
+                continue
+            if isinstance(key, bytes):
+                key_str: str = key.decode(errors="replace")
+                key_bytes: bytes = key
+            else:
+                key_str = str(key)
+                key_bytes = key_str.encode()
+            if fnmatch.fnmatchcase(key_str, pat_str):
+                result.append(key_bytes)
+        return result
+
+    def save(self, dir: str, dbfilename: str) -> bool:
+        """Save the storage data to an RDB file."""
+        path = os.path.join(dir, dbfilename)
+        now_mono = monotonic()
+        now_unix = _time_module.time()
+
+        def encode_length(n: int) -> bytes:
+            if n <= 0x3F:
+                return bytes([n])
+            elif n <= 0x3FFF:
+                return bytes([0x40 | (n >> 8), n & 0xFF])
+            else:
+                return b'\x80' + struct.pack('>I', n)
+
+        def encode_string(s: bytes) -> bytes:
+            return encode_length(len(s)) + s
+
+        entries: list[tuple[bytes, bytes, int | None]] = []
+        for key, (value, expire_at) in list(self._storage.items()):
+            if expire_at is not None and expire_at < now_mono:
+                continue
+            if not isinstance(value, bytes):
+                continue
+            expire_ms: int | None = None
+            if expire_at is not None:
+                expire_ms = int((now_unix + (expire_at - now_mono)) * 1000)
+            if isinstance(key, str):
+                key = key.encode()
+            entries.append((key, value, expire_ms))
+
+        buf = bytearray()
+        buf += b'REDIS0011'
+
+        buf += b'\xfa'
+        buf += encode_string(b'redis-ver')
+        buf += encode_string(b'6.0.16')
+
+        buf += b'\xfe'
+        buf += encode_length(0)
+
+        buf += b'\xfb'
+        buf += encode_length(len(entries))
+        buf += encode_length(sum(1 for _, _, e in entries if e is not None))
+
+        for key, value, expire_ms in entries:
+            if expire_ms is not None:
+                buf += b'\xfc'
+                buf += struct.pack('<Q', expire_ms)
+            buf += b'\x00'
+            buf += encode_string(key)
+            buf += encode_string(value)
+
+        buf += b'\xff'
+        buf += struct.pack('<Q', _crc64(bytes(buf)))
+
+        os.makedirs(dir, exist_ok=True)
+        with open(path, 'wb') as f:
+            f.write(buf)
+
+        return True
+
+    def load(self, dir: str, dbfilename: str, rdb_data: bytes | None = None) -> bool:
+        """Load storage data from an RDB file."""
+        if rdb_data is None:
+            path = os.path.join(dir, dbfilename)
+            if not os.path.exists(path):
+                return False
+
+            with open(path, 'rb') as f:
+                data = f.read()
+
+            if len(data) < 9 or data[:5] != b'REDIS':
+                return False
+        else:
+            data = rdb_data
+        pos = 9
+        now_mono = monotonic()
+        now_unix = _time_module.time()
+
+        def decode_length(p: int) -> tuple[int, int]:
+            first = data[p]
+            enc = (first & 0xC0) >> 6
+            if enc == 0:
+                return first & 0x3F, p + 1
+            elif enc == 1:
+                return ((first & 0x3F) << 8) | data[p + 1], p + 2
+            elif enc == 2:
+                return struct.unpack('>I', data[p+1:p+5])[0], p + 5
+            else:
+                special = first & 0x3F
+                if special == 0:
+                    return data[p + 1], p + 2
+                elif special == 1:
+                    return struct.unpack('<H', data[p+1:p+3])[0], p + 3
+                elif special == 2:
+                    return struct.unpack('<I', data[p+1:p+5])[0], p + 5
+                raise ValueError(f"Unsupported length special encoding: {special}")
+
+        def decode_string(p: int) -> tuple[bytes, int]:
+            first = data[p]
+            enc = (first & 0xC0) >> 6
+            if enc == 3:
+                special = first & 0x3F
+                if special == 0:
+                    return str(data[p + 1]).encode(), p + 2
+                elif special == 1:
+                    val = struct.unpack('<H', data[p+1:p+3])[0]
+                    return str(val).encode(), p + 3
+                elif special == 2:
+                    val = struct.unpack('<I', data[p+1:p+5])[0]
+                    return str(val).encode(), p + 5
+                raise ValueError(f"Unsupported string special encoding: {special}")
+            length, p = decode_length(p)
+            return data[p:p+length], p + length
+
+        while pos < len(data):
+            opcode = data[pos]
+            pos += 1
+
+            if opcode == 0xFA:
+                _, pos = decode_string(pos)
+                _, pos = decode_string(pos)
+            elif opcode == 0xFE:
+                _, pos = decode_length(pos)
+            elif opcode == 0xFB:
+                _, pos = decode_length(pos)
+                _, pos = decode_length(pos)
+            elif opcode == 0xFF:
+                break
+            else:
+                expire_ms: int | None = None
+                value_type = opcode
+
+                if opcode == 0xFC:
+                    expire_ms = struct.unpack('<Q', data[pos:pos+8])[0]
+                    pos += 8
+                    value_type = data[pos]
+                    pos += 1
+                elif opcode == 0xFD:
+                    expire_s = struct.unpack('<I', data[pos:pos+4])[0]
+                    expire_ms = expire_s * 1000
+                    pos += 4
+                    value_type = data[pos]
+                    pos += 1
+
+                key, pos = decode_string(pos)
+
+                if value_type == 0:
+                    value, pos = decode_string(pos)
+                    if expire_ms is not None:
+                        expire_unix = expire_ms / 1000
+                        if expire_unix <= now_unix:
+                            continue
+                        expire_at = now_mono + (expire_unix - now_unix)
+                    else:
+                        expire_at = None
+                    self._storage[key] = (value, expire_at)
+
+        return True
+
+def _crc64(data: bytes) -> int:
+    """Compute CRC-64/JONES checksum as used by Redis."""
+    _POLY = 0xad93d23594c935a9
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ _POLY
+            else:
+                crc >>= 1
+    return crc
+
 
 _storage_instance: CacheStorage | None = None
     

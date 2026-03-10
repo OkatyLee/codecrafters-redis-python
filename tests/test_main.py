@@ -1,7 +1,8 @@
 import argparse
 import asyncio
-from importlib.util import _incompatible_extension_module_restrictions
-from unittest.mock import AsyncMock
+import tempfile
+import os
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -56,7 +57,7 @@ async def test_main_starts_server_and_serves_forever(monkeypatch):
 
     monkeypatch.setattr(
         "app.main.parse_args",
-        lambda: argparse.Namespace(host="localhost", port=6379, replicaof=None),
+        lambda: argparse.Namespace(host="localhost", port=6379, replicaof=None, dir="./test_path", dbfilename="test_file"),
     )
 
     async def fake_start_server(callback, host, port):
@@ -204,6 +205,267 @@ async def test_slave_write_is_not_propagated_back_to_master():
     await slave_server.wait_closed()
     stop_master.set()
     await replication_task
+    master_server.close()
+    await master_server.wait_closed()
+
+
+# ---------- parse_args tests ----------
+
+def test_parse_args_defaults(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["prog"])
+    from app.main import parse_args
+    args = parse_args()
+    assert args.port == 6379
+    assert args.host == "127.0.0.1"
+    assert args.replicaof is None
+    assert args.dbfilename == "dump.rdb"
+
+
+def test_parse_args_custom_values(monkeypatch):
+    monkeypatch.setattr("sys.argv", [
+        "prog",
+        "--port", "7000",
+        "--host", "0.0.0.0",
+        "--replicaof", "127.0.0.1:6379",
+        "--dir", "/tmp/redis",
+        "--dbfilename", "mydb.rdb",
+    ])
+    from app.main import parse_args
+    args = parse_args()
+    assert args.port == 7000
+    assert args.host == "0.0.0.0"
+    assert args.replicaof == "127.0.0.1:6379"
+    assert args.dir == "/tmp/redis"
+    assert args.dbfilename == "mydb.rdb"
+
+
+def test_parse_args_short_port_flag(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["prog", "-p", "9999"])
+    from app.main import parse_args
+    args = parse_args()
+    assert args.port == 9999
+
+
+# ---------- main() startup tests ----------
+
+@pytest.mark.asyncio
+async def test_main_loads_rdb_on_startup(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Pre-populate an RDB file
+        storage = app.storage.CacheStorage()
+        storage.set(b"preloaded", b"value")
+        storage.save(tmpdir, "startup.rdb")
+
+        server = _ServerStub()
+
+        monkeypatch.setattr(
+            "app.main.parse_args",
+            lambda: argparse.Namespace(
+                host="127.0.0.1", port=6379, replicaof=None,
+                dir=tmpdir, dbfilename="startup.rdb",
+            ),
+        )
+        monkeypatch.setattr("app.main.asyncio.start_server", AsyncMock(return_value=server))
+
+        app.storage._storage_instance = None
+        await main()
+
+        assert app.storage.get_storage().get(b"preloaded") == b"value"
+
+
+@pytest.mark.asyncio
+async def test_main_missing_rdb_does_not_crash(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        server = _ServerStub()
+
+        monkeypatch.setattr(
+            "app.main.parse_args",
+            lambda: argparse.Namespace(
+                host="127.0.0.1", port=6379, replicaof=None,
+                dir=tmpdir, dbfilename="missing.rdb",
+            ),
+        )
+        monkeypatch.setattr("app.main.asyncio.start_server", AsyncMock(return_value=server))
+
+        app.storage._storage_instance = None
+        await main()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_main_invalid_replicaof_format_returns_early(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "app.main.parse_args",
+        lambda: argparse.Namespace(
+            host="127.0.0.1", port=6380, replicaof="bad-format",
+            dir="./data", dbfilename="dump.rdb",
+        ),
+    )
+
+    await main()
+
+    captured = capsys.readouterr()
+    assert "Error" in captured.out
+
+
+# ---------- replication_handshake_and_loop error-path tests ----------
+
+@pytest.mark.asyncio
+async def test_handshake_aborts_on_bad_ping_response():
+    async def fake_master(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        parser = RESPParser(reader)
+        await parser.parse()  # consume PING
+        writer.write(b"+NOPE\r\n")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    master_server = await asyncio.start_server(fake_master, "127.0.0.1", 0)
+    master_addr = master_server.sockets[0].getsockname()
+
+    config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    master_reader, master_writer = await asyncio.open_connection(*master_addr)
+
+    # Must return without raising
+    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+
+    master_server.close()
+    await master_server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_handshake_aborts_on_bad_replconf_listening_port_response():
+    async def fake_master(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        parser = RESPParser(reader)
+        await parser.parse()  # PING
+        writer.write(b"+PONG\r\n")
+        await writer.drain()
+        await parser.parse()  # REPLCONF listening-port
+        writer.write(b"-ERR\r\n")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    master_server = await asyncio.start_server(fake_master, "127.0.0.1", 0)
+    master_addr = master_server.sockets[0].getsockname()
+
+    config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    master_reader, master_writer = await asyncio.open_connection(*master_addr)
+
+    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+
+    master_server.close()
+    await master_server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_handshake_aborts_on_bad_replconf_capa_response():
+    async def fake_master(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        parser = RESPParser(reader)
+        await parser.parse()  # PING
+        writer.write(b"+PONG\r\n")
+        await writer.drain()
+        await parser.parse()  # REPLCONF listening-port
+        writer.write(b"+OK\r\n")
+        await writer.drain()
+        await parser.parse()  # REPLCONF capa
+        writer.write(b"-ERR\r\n")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    master_server = await asyncio.start_server(fake_master, "127.0.0.1", 0)
+    master_addr = master_server.sockets[0].getsockname()
+
+    config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    master_reader, master_writer = await asyncio.open_connection(*master_addr)
+
+    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+
+    master_server.close()
+    await master_server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_handshake_aborts_on_bad_psync_response():
+    async def fake_master(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        parser = RESPParser(reader)
+        await parser.parse()
+        writer.write(b"+PONG\r\n")
+        await writer.drain()
+        await parser.parse()
+        writer.write(b"+OK\r\n")
+        await writer.drain()
+        await parser.parse()
+        writer.write(b"+OK\r\n")
+        await writer.drain()
+        await parser.parse()  # PSYNC
+        writer.write(b"+UNEXPECTED response\r\n")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    master_server = await asyncio.start_server(fake_master, "127.0.0.1", 0)
+    master_addr = master_server.sockets[0].getsockname()
+
+    config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    master_reader, master_writer = await asyncio.open_connection(*master_addr)
+
+    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+
+    master_server.close()
+    await master_server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_handshake_aborts_on_non_bytes_rdb_payload():
+    async def fake_master(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        parser = RESPParser(reader)
+        await parser.parse()
+        writer.write(b"+PONG\r\n")
+        await writer.drain()
+        await parser.parse()
+        writer.write(b"+OK\r\n")
+        await writer.drain()
+        await parser.parse()
+        writer.write(b"+OK\r\n")
+        await writer.drain()
+        await parser.parse()  # PSYNC
+        writer.write(b"+FULLRESYNC test-replid 0\r\n")
+        # Send a simple string instead of bulk string (not bytes after parse)
+        writer.write(b"+not-a-bulk-string\r\n")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    master_server = await asyncio.start_server(fake_master, "127.0.0.1", 0)
+    master_addr = master_server.sockets[0].getsockname()
+
+    config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    master_reader, master_writer = await asyncio.open_connection(*master_addr)
+
+    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+
+    master_server.close()
+    await master_server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_handshake_handles_connection_error_gracefully(capsys):
+    """If the master closes the connection mid-handshake, no exception bubbles up."""
+    async def fake_master(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Close immediately without sending anything
+        writer.close()
+        await writer.wait_closed()
+
+    master_server = await asyncio.start_server(fake_master, "127.0.0.1", 0)
+    master_addr = master_server.sockets[0].getsockname()
+
+    config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    master_reader, master_writer = await asyncio.open_connection(*master_addr)
+
+    # Must return cleanly without raising, regardless of which code-path is taken
+    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+
     master_server.close()
     await master_server.wait_closed()
 
