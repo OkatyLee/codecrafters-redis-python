@@ -59,6 +59,12 @@ def handle_set_command(key: bytes, value: bytes, ttl: int | float | None = None)
     return storage.set(key, value, ttl)
 
 
+@redis_command(b"ZADD", is_write=True)
+def handle_zadd_command(key: bytes, score: float, member: bytes) -> int:
+    storage = get_storage()
+    return storage.zadd(key, score, member)
+
+
 def handle_get_command(key: bytes) -> bytes | None:
     """Return the stored value for *key* or ``None`` if missing."""
     storage = get_storage()
@@ -280,6 +286,33 @@ def handle_keys_command(pattern: bytes = b"*") -> list[bytes]:
     storage = get_storage()
     return storage.keys(pattern)
 
+
+def handle_zrank_command(key: bytes, member: bytes) -> int | None:
+    storage = get_storage()
+    return storage.zrank(key, member)
+
+
+def handle_zrange_command(key: bytes, start: int, end: int) -> list[bytes]:
+    storage = get_storage()
+    return storage.zrange(key, start, end)
+
+
+def handle_zcard_command(key: bytes) -> int:
+    storage = get_storage()
+    return storage.zcard(key)
+
+
+def handle_zscore_command(key: bytes, member: bytes) -> float | None:
+    storage = get_storage()
+    return storage.zscore(key, member)
+
+
+def handle_zrem_command(key: bytes, members: list[bytes]) -> int:
+    storage = get_storage()
+    return storage.zrem(key, members)
+
+
+
 def _normalize_command(data: Sequence[object]) -> list[bytes]:
     """Normalize parsed RESP array items to bytes and uppercase command name."""
     normalized = [item if isinstance(item, bytes) else str(item).encode() for item in data]
@@ -477,6 +510,25 @@ async def _execute_command(
                 assert config is not None
                 count = await handle_publish_command(config, channel, message)
                 response = parser.encode_integer(count)
+            case [b"ZADD", key, score, member]:
+                is_existing = handle_zadd_command(key, float(score), member)
+                response = parser.encode_integer(1 if not is_existing else 0)
+            case [b"ZRANK", key, member]:
+                rank = handle_zrank_command(key, member)
+                response = parser.encode_integer(rank) if rank is not None else parser.encode_null_array()
+            case [b"ZRANGE", key, start, end]:
+                members = handle_zrange_command(key, int(start), int(end))
+                response = parser.encode_array(members)
+                print(response)
+            case [b"ZCARD", key]:
+                count = handle_zcard_command(key)
+                response = parser.encode_integer(count)
+            case [b"ZSCORE", key, member]:
+                score = handle_zscore_command(key, member)
+                response = parser.encode_bulk_string(str(score).encode()) if score is not None else parser.encode_null()
+            case [b"ZREM", key, *members]:
+                removed_count = handle_zrem_command(key, members)
+                response = parser.encode_integer(removed_count)
             case [_, *_]:
                 response = parser.encode_simple_error("unknown command")
     except (ValueError, TypeError, RESPError, AssertionError) as e:

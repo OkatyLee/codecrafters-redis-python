@@ -5,6 +5,7 @@ import time as time_module
 
 import pytest
 
+from app import storage
 from app.parser import RESPError
 from app.storage import CacheStorage
 
@@ -430,3 +431,165 @@ def test_keys_no_match_returns_empty():
 
 	assert storage.keys(b"xyz*") == []
 
+
+# ----------------- SortedSet Tests ----------------------------
+
+def test_zadd_new_members():
+	storage = CacheStorage()
+
+	results = [storage.zadd(b"zset", i, f"member{i}".encode()) for i in range(10)]
+	assert isinstance(storage.get(b"zset"), dict)
+	assert all(res == False for res in results)
+	assert storage.get(b"zset") == {f"member{i}".encode(): float(i) for i in range(10)}
+
+
+def test_zadd_existed_members():
+	storage = CacheStorage()
+	res1 = storage.zadd(b"zset", 1.0, b"member1")
+	res2 = storage.zadd(b"zset", 2.0, b"member1")
+	assert isinstance(storage.get(b"zset"), dict)
+	assert storage.get(b"zset") == {b"member1": 2.0}
+	assert res1 == False and res2 == True
+
+
+def test_zrank():
+	storage = CacheStorage()
+
+	res1 = storage.zadd(b"zset_key" , 100.0,  b"foo") 
+	res2 = storage.zadd(b"zset_key" , 100.0,  b"bar") 
+	res3 = storage.zadd(b"zset_key" , 20.0,  b"baz") 
+	res4 = storage.zadd(b"zset_key" , 30.1,  b"caz") 
+	res5 = storage.zadd(b"zset_key" , 40.2,  b"paz")
+	assert all(res == False for res in [res1, res2, res3, res4, res5])
+	assert storage.get(b"zset_key") == {b"foo": 100.0, b"bar": 100.0, b"baz": 20.0, b"caz": 30.1, b"paz": 40.2}
+	ranks = [storage.zrank(b"zset_key", member) for member in [b"baz", b"caz", b"paz", b"bar", b"foo"]]
+	assert ranks == list(range(5))
+
+
+def test_zrank_no_existing_member():
+	storage = CacheStorage()
+	res1 = storage.zadd(b"zset_key" , 100.0,  b"foo") 
+	assert storage.zrank(b"zset_key", b"nonexistent") is None
+
+
+def test_zrank_no_existing_key():
+	storage = CacheStorage()
+	res1 = storage.zadd(b"zset_key" , 100.0,  b"foo") 
+	assert storage.zrank(b"noexistingkey", b"foo") is None
+
+
+def test_zrange():
+    storage = CacheStorage()
+    storage.zadd(b"zset_key", 100.0, b"foo")
+    storage.zadd(b"zset_key", 100.0, b"bar")
+    storage.zadd(b"zset_key", 20.0, b"baz")
+    storage.zadd(b"zset_key", 30.1, b"caz")
+    storage.zadd(b"zset_key", 40.2, b"paz")
+
+    result = storage.zrange(b"zset_key", 0, 2)
+    assert result == [b"baz", b"caz", b"paz"]
+    
+    
+def test_zrange_unexisted_set():
+    storage = CacheStorage()
+    storage.zadd(b"zset_key", 100.0, b"foo")
+    storage.zadd(b"zset_key", 100.0, b"bar")
+    storage.zadd(b"zset_key", 20.0, b"baz")
+    storage.zadd(b"zset_key", 30.1, b"caz")
+    storage.zadd(b"zset_key", 40.2, b"paz")
+
+    result = storage.zrange(b"nonexistent", 0, 2)
+    assert result == []
+    
+    
+def test_zrange_out_of_bounds():
+    storage = CacheStorage()
+    storage.zadd(b"zset_key", 100.0, b"foo")
+    storage.zadd(b"zset_key", 100.0, b"bar")
+    storage.zadd(b"zset_key", 20.0, b"baz")
+    storage.zadd(b"zset_key", 30.1, b"caz")
+    storage.zadd(b"zset_key", 40.2, b"paz")
+
+    result = storage.zrange(b"zset_key", 10, 12)
+    assert result == []
+    
+    
+def test_zrange_right_border_out_of_bounds():
+    storage = CacheStorage()
+    storage.zadd(b"zset_key", 100.0, b"foo")
+    storage.zadd(b"zset_key", 100.0, b"bar")
+    storage.zadd(b"zset_key", 20.0, b"baz")
+    storage.zadd(b"zset_key", 30.1, b"caz")
+    storage.zadd(b"zset_key", 40.2, b"paz")
+
+    result = storage.zrange(b"zset_key", 3, 12)
+    assert result == [b"bar", b"foo"]
+    
+    
+def test_zrange_left_bound_greater_than_right():
+    storage = CacheStorage()
+    storage.zadd(b"zset_key", 100.0, b"foo")
+    storage.zadd(b"zset_key", 100.0, b"bar")
+    storage.zadd(b"zset_key", 20.0, b"baz")
+    storage.zadd(b"zset_key", 30.1, b"caz")
+    storage.zadd(b"zset_key", 40.2, b"paz")
+
+    result = storage.zrange(b"zset_key", 5, 2)
+    assert result == []
+    
+def test_zcard():
+    storage = CacheStorage()
+    storage.zadd(b"zset_key", 100.0, b"foo")
+    storage.zadd(b"zset_key", 100.0, b"bar")
+    storage.zadd(b"zset_key", 20.0, b"baz")
+    storage.zadd(b"zset_key", 30.1, b"caz")
+    storage.zadd(b"zset_key", 40.2, b"paz")
+
+    result = storage.zcard(b"zset_key")
+    assert result == 5
+    
+    
+def test_zcard_empty_set():
+    storage = CacheStorage()
+    result = storage.zcard(b"zset_key")
+    assert result == 0
+    
+
+def test_zscore():
+    storage = CacheStorage()
+    storage.zadd(b"zset_key", 100.0, b"foo")
+    storage.zadd(b"zset_key", 100.0, b"bar")
+    storage.zadd(b"zset_key", 20.0, b"baz")
+
+    result = storage.zscore(b"zset_key", b"foo")
+    assert result == 100.0
+    result = storage.zscore(b"zset_key", b"baz")
+    assert result == 20.0
+
+    result = storage.zscore(b"zset_key", b"nonexistent")
+    assert result is None
+    
+def test_zrem():
+    storage = CacheStorage()
+    storage.zadd(b"zset_key", 100.0, b"foo")
+    storage.zadd(b"zset_key", 100.0, b"bar")
+    storage.zadd(b"zset_key", 20.0, b"baz")
+
+    result = storage.zrem(b"zset_key", [b"foo"])
+    assert result == 1
+    assert storage.get(b"zset_key") == {b"bar": 100.0, b"baz": 20.0}
+
+    result = storage.zrem(b"zset_key", [b"nonexistent"])
+    assert result == 0
+    assert storage.get(b"zset_key") == {b"bar": 100.0, b"baz": 20.0}
+    
+    result = storage.zrem(b"zset_key", [b"bar", b"nonexistent"])
+    assert result == 1
+    assert storage.get(b"zset_key") == {b"baz": 20.0}
+    
+    result = storage.zadd(b"zset_key", 30.0, b"qux")
+    assert storage.get(b"zset_key") == {b"baz": 20.0, b"qux": 30.0}
+    
+    result = storage.zrem(b"zset_key", [b"qux", b"baz"])
+    assert result == 2
+    assert storage.get(b"zset_key") == {}

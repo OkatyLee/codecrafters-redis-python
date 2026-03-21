@@ -317,6 +317,45 @@ async def test_list_commands_rpush_llen_lrange():
 
 
 @pytest.mark.asyncio
+async def test_lrange_wrongtype_returns_error_for_string_and_sorted_set_keys():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$3\r\nSET\r\n$7\r\nstr_key\r\n$5\r\nvalue\r\n",
+    )
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$4\r\nZADD\r\n$8\r\nzset_key\r\n$3\r\n1.0\r\n$3\r\nfoo\r\n",
+    )
+
+    wrongtype_on_string = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nLRANGE\r\n$7\r\nstr_key\r\n$1\r\n0\r\n$2\r\n-1\r\n",
+    )
+    wrongtype_on_zset = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nLRANGE\r\n$8\r\nzset_key\r\n$1\r\n0\r\n$2\r\n-1\r\n",
+    )
+
+    expected = b"-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+    assert wrongtype_on_string == expected
+    assert wrongtype_on_zset == expected
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_lpop_single_and_count_modes():
     server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
     addr = server.sockets[0].getsockname()
@@ -761,6 +800,45 @@ async def test_xread_rejects_non_stream_key_type_with_error_reply():
     )
 
     assert response == b"-ERR Key b'notstream' is not a stream\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_xrange_wrongtype_returns_error_for_string_and_sorted_set_keys():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$3\r\nSET\r\n$10\r\nnotstream1\r\n$5\r\nvalue\r\n",
+    )
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$4\r\nZADD\r\n$10\r\nnotstream2\r\n$3\r\n1.0\r\n$3\r\nfoo\r\n",
+    )
+
+    wrongtype_on_string = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nXRANGE\r\n$10\r\nnotstream1\r\n$1\r\n-\r\n$1\r\n+\r\n",
+    )
+    wrongtype_on_zset = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nXRANGE\r\n$10\r\nnotstream2\r\n$1\r\n-\r\n$1\r\n+\r\n",
+    )
+
+    expected = b"-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+    assert wrongtype_on_string == expected
+    assert wrongtype_on_zset == expected
 
     writer.close()
     await writer.wait_closed()
@@ -1595,3 +1673,241 @@ async def test_unsubscribe_exits_subscribe_mode_and_restores_normal_ping():
     await server.wait_closed()
 
 
+async def create_sorted_set(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    res1 = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$4\r\nZADD\r\n$8\r\nzset_key\r\n$3\r\n1.1\r\n$3\r\nfoo\r\n",
+    )
+    res2 = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$4\r\nZADD\r\n$8\r\nzset_key\r\n$3\r\n100\r\n$3\r\nfoo\r\n",
+    )
+    res3 = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$4\r\nZADD\r\n$8\r\nzset_key\r\n$3\r\n100\r\n$3\r\nbar\r\n",
+    )
+    res4 = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$4\r\nZADD\r\n$8\r\nzset_key\r\n$4\r\n20.0\r\n$3\r\nbaz\r\n",
+    )
+    res5 = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$4\r\nZADD\r\n$8\r\nzset_key\r\n$4\r\n30.1\r\n$3\r\ncaz\r\n",
+    )
+    res6 = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$4\r\nZADD\r\n$8\r\nzset_key\r\n$4\r\n40.2\r\n$3\r\npaz\r\n",
+    )
+    return res1, res2, res3, res4, res5, res6
+
+
+@pytest.mark.asyncio
+async def test_sorted_set_command_zadd_zrank():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+    res1, res2, res3, res4, res5, res6 = await create_sorted_set(reader, writer)
+    assert all(res == b":1\r\n" for res in [res1, res3, res4, res5, res6])
+    assert res2 == b":0\r\n"
+    zrank_res = [
+        await send_command_and_read_response(
+            reader,
+            writer,
+            f"*3\r\n$5\r\nZRANK\r\n$8\r\nzset_key\r\n$3\r\n{member}\r\n".encode(),
+        )
+        for member in ["baz", "caz", "paz", "bar", "foo"]
+    ]
+    assert zrank_res == [f":{i}\r\n".encode() for i in range(5)]
+    zrank_res =await send_command_and_read_response(
+            reader,
+            writer,
+            b"*3\r\n$5\r\nZRANK\r\n$8\r\nzset_key\r\n$16\r\nunexisted_member\r\n",
+        )
+    assert zrank_res == b"*-1\r\n"
+    zrank_res =await send_command_and_read_response(
+            reader,
+            writer,
+            b"*3\r\n$5\r\nZRANK\r\n$8\r\nzset_key\r\n$7\r\nmember0\r\n",
+        )
+    assert zrank_res == b"*-1\r\n"
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+    
+
+@pytest.mark.asyncio
+async def test_sorted_set_command_zadd_zrange():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+    results = await create_sorted_set(reader, writer)
+    assert list(results) == [b':1\r\n', b':0\r\n', b':1\r\n', b':1\r\n', b':1\r\n', b':1\r\n']
+    pos_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nZRANGE\r\n$8\r\nzset_key\r\n$1\r\n0\r\n$1\r\n5\r\n",
+        )
+    assert pos_result == b"*5\r\n$3\r\nbaz\r\n$3\r\ncaz\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nfoo\r\n"
+    out_of_bound_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nZRANGE\r\n$8\r\nzset_key\r\n$2\r\n10\r\n$2\r\n15\r\n",
+        )
+    assert out_of_bound_result == b"*0\r\n"
+    right_out_of_bound_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nZRANGE\r\n$8\r\nzset_key\r\n$1\r\n3\r\n$2\r\n20\r\n",
+    )
+    assert right_out_of_bound_result == b"*2\r\n$3\r\nbar\r\n$3\r\nfoo\r\n"
+    left_greater_right_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nZRANGE\r\n$8\r\nzset_key\r\n$2\r\n20\r\n$1\r\n3\r\n",
+    )
+    assert left_greater_right_result == b"*0\r\n"
+    negative_index_res = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nZRANGE\r\n$8\r\nzset_key\r\n$1\r\n2\r\n$2\r\n-1\r\n"
+    )
+    assert negative_index_res == b"*3\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nfoo\r\n"
+    negative_left_out_of_bound_res = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nZRANGE\r\n$8\r\nzset_key\r\n$2\r\n-8\r\n$2\r\n-1\r\n"
+    )
+    assert negative_left_out_of_bound_res == b"*5\r\n$3\r\nbaz\r\n$3\r\ncaz\r\n$3\r\npaz\r\n$3\r\nbar\r\n$3\r\nfoo\r\n"
+    neg_left_bound_lower_than_neg_right_bound = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nZRANGE\r\n$8\r\nzset_key\r\n$2\r\n-2\r\n$2\r\n-3\r\n"
+    ) 
+    assert neg_left_bound_lower_than_neg_right_bound == b"*0\r\n"
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+    
+    
+@pytest.mark.asyncio
+async def test_sorted_set_command_zcard():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+    empty_zcard_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*2\r\n$5\r\nZCARD\r\n$8\r\nzset_key\r\n"
+    )
+    assert empty_zcard_result == b":0\r\n"
+    results = await create_sorted_set(reader, writer)
+    assert list(results) == [b':1\r\n', b':0\r\n', b':1\r\n', b':1\r\n', b':1\r\n', b':1\r\n']
+    zcard_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*2\r\n$5\r\nZCARD\r\n$8\r\nzset_key\r\n"
+    )
+    assert zcard_result == b":5\r\n"
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+    
+
+@pytest.mark.asyncio
+async def test_sorted_set_command_zscore():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+    results = await create_sorted_set(reader, writer)
+    assert list(results) == [b':1\r\n', b':0\r\n', b':1\r\n', b':1\r\n', b':1\r\n', b':1\r\n']
+    zscore_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$6\r\nZSCORE\r\n$8\r\nzset_key\r\n$3\r\nfoo\r\n"
+    )
+    assert zscore_result == b"$5\r\n100.0\r\n"
+    zscore_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$6\r\nZSCORE\r\n$8\r\nzset_key\r\n$11\r\nnonexistent\r\n"
+    )
+    assert zscore_result == b"$-1\r\n"
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+    
+
+@pytest.mark.asyncio
+async def test_sorted_set_command_zrem():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+    results = await create_sorted_set(reader, writer)
+    assert list(results) == [b':1\r\n', b':0\r\n', b':1\r\n', b':1\r\n', b':1\r\n', b':1\r\n']
+    zrem_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$4\r\nZREM\r\n$8\r\nzset_key\r\n$3\r\nfoo\r\n"
+    )
+    assert zrem_result == b":1\r\n"
+    zrem_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$4\r\nZREM\r\n$8\r\nzset_key\r\n$11\r\nnonexistent\r\n"
+    )
+    assert zrem_result == b":0\r\n"
+    
+    zrem_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$4\r\nZREM\r\n$8\r\nzset_key\r\n$3\r\nbar\r\n$3\r\nbaz\r\n"
+    )
+    assert zrem_result == b":2\r\n"
+    
+    zrange_res = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nZRANGE\r\n$8\r\nzset_key\r\n$1\r\n0\r\n$2\r\n-1\r\n"
+    )
+    assert zrange_res == b"*2\r\n$3\r\ncaz\r\n$3\r\npaz\r\n"
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+    

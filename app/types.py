@@ -3,7 +3,9 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from time import time
 from typing import Any, Callable
+import heapq
 
+from dataclasses import dataclass
 from app.parser import RESPError
 
 type RedisKey = bytes | str
@@ -11,6 +13,8 @@ type ExpireAt = float | None
 type Storage = dict[RedisKey, tuple[Any, ExpireAt]]
 type Waiters = dict[RedisKey, list[asyncio.Event]]
 type StreamEntry = tuple[str, dict[bytes, bytes]]
+
+WRONGTYPE_ERROR = "WRONGTYPE Operation against a key holding the wrong kind of value"
 
 
 class ValueType(ABC):
@@ -36,28 +40,36 @@ class ListType(ValueType):
     def supports(self, value: Any) -> bool:
         return isinstance(value, list)
 
-    def lpush(self, key: RedisKey, *values: bytes) -> int:
+    def _get_existing_list(self, key: RedisKey) -> list[bytes] | None:
         if key not in self._storage:
-            self._storage[key] = ([], None)
-        current_list, _ = self._storage[key]
+            return None
+        current_value, _ = self._storage[key]
+        if not isinstance(current_value, list):
+            raise TypeError(WRONGTYPE_ERROR)
+        return current_value
+
+    def lpush(self, key: RedisKey, *values: bytes) -> int:
+        current_list = self._get_existing_list(key)
+        if current_list is None:
+            current_list = []
         current_list[:0] = values[::-1]
         self._storage[key] = (current_list, None)
         self.notify_waiters(key)
         return len(current_list)
 
     def rpush(self, key: RedisKey, *values: bytes) -> int:
-        if key not in self._storage:
-            self._storage[key] = ([], None)
-        current_list, _ = self._storage[key]
+        current_list = self._get_existing_list(key)
+        if current_list is None:
+            current_list = []
         current_list.extend(values)
         self._storage[key] = (current_list, None)
         self.notify_waiters(key)
         return len(current_list)
 
     def lrange(self, key: RedisKey, start: int, end: int) -> list[bytes]:
-        if key not in self._storage:
+        current_list = self._get_existing_list(key)
+        if current_list is None:
             return []
-        current_list, _ = self._storage[key]
         if start < 0:
             start = max(0, len(current_list) + start)
         if end < 0:
@@ -66,15 +78,15 @@ class ListType(ValueType):
         return current_list[start:end]
 
     def llen(self, key: RedisKey) -> int:
-        if key not in self._storage:
+        current_list = self._get_existing_list(key)
+        if current_list is None:
             return 0
-        current_list, _ = self._storage[key]
         return len(current_list)
 
     def lpop(self, key: RedisKey, count: int | None = None) -> list[bytes] | None:
-        if key not in self._storage:
+        current_list = self._get_existing_list(key)
+        if current_list is None:
             return None
-        current_list, _ = self._storage[key]
         if not current_list:
             return None
         if count is not None:
@@ -92,11 +104,10 @@ class ListType(ValueType):
 
     async def blpop(self, *keys: RedisKey, timeout: float = 0) -> tuple[RedisKey, bytes] | None:
         for key in keys:
-            if key in self._storage:
-                current_list, _ = self._storage[key]
-                if current_list:
-                    value = current_list.pop(0)
-                    return (key, value)
+            current_list = self._get_existing_list(key)
+            if current_list:
+                value = current_list.pop(0)
+                return (key, value)
 
         event = asyncio.Event()
         for key in keys:
@@ -114,11 +125,10 @@ class ListType(ValueType):
                     return None
 
                 for key in keys:
-                    if key in self._storage:
-                        current_list, _ = self._storage[key]
-                        if current_list:
-                            value = current_list.pop(0)
-                            return (key, value)
+                    current_list = self._get_existing_list(key)
+                    if current_list:
+                        value = current_list.pop(0)
+                        return (key, value)
         finally:
             for key in keys:
                 if key in self._list_waiters:
@@ -145,6 +155,9 @@ class StreamType(ValueType):
 
     def supports(self, value: Any) -> bool:
         return isinstance(value, dict)
+
+    def _is_stream_value(self, value: Any) -> bool:
+        return isinstance(value, dict) and (not value or "entries" in value or "ID" in value)
 
     def _decode_stream_id(self, stream_id: str | bytes) -> str:
         if isinstance(stream_id, bytes):
@@ -230,8 +243,10 @@ class StreamType(ValueType):
         if end == "+":
             end = ''
         stream = self._get_value(key)
-        if not isinstance(stream, dict):
+        if stream is None:
             return []
+        if not self._is_stream_value(stream):
+            raise TypeError(WRONGTYPE_ERROR)
 
         entries = stream.get("entries", [])
         result = []
@@ -275,6 +290,79 @@ class StreamType(ValueType):
                 result.append([key, stream_entries])
 
         return result
+
+
+class SortedSetType(ValueType):
+    
+    def __init__(
+        self,
+        get_value: Callable[[RedisKey], Any],
+        set_value: Callable[[RedisKey, Any], bool],
+    ):
+        self._get_value = get_value
+        self._set_value = set_value
+        
+    @property
+    def name(self): 
+        return "set"
+    
+    def supports(self, value):
+        return isinstance(value, (set, dict))
+        
+    def zadd(self, key: RedisKey, score: float, member: bytes) -> bool:
+        sorted_set = self._get_value(key)
+        if not isinstance(sorted_set, dict):
+            sorted_set = {}
+        is_existed = member in sorted_set
+        sorted_set[member] = score
+        self._set_value(key, sorted_set)
+        return is_existed
+
+    def zrank(self, key: RedisKey, member: bytes) -> int | None:
+        sorted_set = self._get_value(key)
+        if not isinstance(sorted_set, dict):
+            return None
+        if member not in sorted_set:
+            return None
+        target_score = sorted_set[member]
+        
+        return sum(1 for m, s in sorted_set.items() if s < target_score or (s == target_score and m < member))
+
+    def zrange(self, key: RedisKey, start: int, end: int) -> list[bytes]:
+        sorted_set = self._get_value(key)
+        if start < 0:
+            start = max(len(sorted_set) + start, 0)
+        if end < 0:
+            end = max(len(sorted_set) + end, 0)
+        if not isinstance(sorted_set, dict):
+            return []
+        members = list(sorted_set.keys())
+        members.sort(key=lambda m: (sorted_set[m], m))
+        return members[start:end+1]
+    
+    def zcard(self, key: RedisKey) -> int:
+        sorted_set = self._get_value(key)
+        if not isinstance(sorted_set, dict):
+            return 0
+        return len(sorted_set)
+    
+    def zscore(self, key: RedisKey, member: bytes) -> float | None:
+        sorted_set = self._get_value(key)
+        if not isinstance(sorted_set, dict):
+            return None
+        return sorted_set.get(member)
+
+    def zrem(self, key: RedisKey, members: list[bytes]) -> int:
+        sorted_set = self._get_value(key)
+        if not isinstance(sorted_set, dict):
+            return 0
+        removed_count = 0
+        for member in members:
+            if member in sorted_set:
+                del sorted_set[member]
+                removed_count += 1
+        self._set_value(key, sorted_set)
+        return removed_count
 
 
 class StringType(ValueType):

@@ -8,7 +8,7 @@ from collections import defaultdict
 from time import monotonic
 from typing import Any
 
-from app.types import ListType, StreamType, StringType, TypeRegistry
+from app.types import ListType, SortedSetType, StreamType, StringType, TypeRegistry
 
 type RedisKey = bytes | str
 type StoredValue = Any
@@ -37,6 +37,7 @@ class CacheStorage:
         self._list_waiters: dict[RedisKey, list[asyncio.Event]] = defaultdict(list)
         self._list_type = ListType(self._storage, self._list_waiters)
         self._stream_type = StreamType(self.get, self.set)
+        self._sset = SortedSetType(self.get, self.set)
         self._type_registry = TypeRegistry(self._list_type, self._stream_type, StringType())
 
     def set(self, key: RedisKey, value: StoredValue, ttl: int | float | None = None) -> bool:
@@ -360,6 +361,32 @@ class CacheStorage:
                     self._storage[key] = (value, expire_at)
 
         return True
+    
+    def zadd(self, key: RedisKey, score: float, member: bytes) -> bool:
+        """Adding a member to a sorted set"""
+        return self._sset.zadd(key, score, member)
+    
+    def zrank(self, key: RedisKey, member: bytes) -> int | None:
+        """Return the rank of member in the sorted set at key."""
+        #TODO
+        return self._sset.zrank(key, member)
+    
+    def zrange(self, key: RedisKey, start: int, end: int) -> list[bytes]:
+        """Return a range of members in the sorted set at key."""
+        return self._sset.zrange(key, start, end)
+    
+    def zcard(self, key: RedisKey) -> int:
+        """Return the number of members in the sorted set at key."""
+        return self._sset.zcard(key)
+    
+    def zscore(self, key: RedisKey, member: bytes) -> float | None:
+        """Return the score of member in the sorted set at key."""
+        return self._sset.zscore(key, member)
+
+    def zrem(self, key: RedisKey, members: list[bytes]) -> int:
+        """Remove members from the sorted set at key."""
+        return self._sset.zrem(key, members)
+
 
 def _crc64(data: bytes) -> int:
     """Compute CRC-64/JONES checksum as used by Redis."""
