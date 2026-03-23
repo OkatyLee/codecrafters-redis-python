@@ -194,7 +194,6 @@ def handle_del_command(key: bytes) -> bool:
     return storage.delete(key)
 
 
-
 def handle_replconf_getack_command(config: ServerConfig | None) -> int:
     assert config is not None
     return config.get_replica_offset()
@@ -307,10 +306,31 @@ def handle_zscore_command(key: bytes, member: bytes) -> float | None:
     return storage.zscore(key, member)
 
 
+@redis_command(b"ZREM", is_write=True)
 def handle_zrem_command(key: bytes, members: list[bytes]) -> int:
     storage = get_storage()
     return storage.zrem(key, members)
 
+
+@redis_command(b"GEOADD", is_write=True)
+def handle_geoadd_command(key: bytes, longitude: float, latitude: float, member: bytes) -> int:
+    storage = get_storage()
+    return storage.geoadd(key, longitude, latitude, member)
+
+
+def handle_geopos_command(key: bytes, members: list[bytes]) -> list[list[bytes] | None]:
+    storage = get_storage()
+    return storage.geopos(key, members)
+
+
+def handle_geodist_command(key: bytes, member1: bytes, member2: bytes) -> float | None:
+    storage = get_storage()
+    return storage.geodist(key, member1, member2)
+
+
+def handle_geosearch_command(key: bytes, longitude: bytes, latitude: bytes, radius: bytes, unit: bytes) -> list[bytes]:
+    storage = get_storage()
+    return storage.geosearch(key, longitude, latitude, radius, unit)
 
 
 def _normalize_command(data: Sequence[object]) -> list[bytes]:
@@ -344,7 +364,13 @@ async def _execute_command(
             case [b"SET", key, value, *args]:
                 if len(args) % 2 != 0:
                     raise ValueError("syntax error")
-                params = dict(zip(args[::2], args[1::2], strict=False))
+                params = {
+                    option.upper(): option_value
+                    for option, option_value in zip(args[::2], args[1::2], strict=False)
+                }
+                unknown_options = [opt for opt in params if opt not in (b"EX", b"PX")]
+                if unknown_options:
+                    raise ValueError("syntax error")
                 if params.get(b"EX") and params.get(b"PX"):
                     raise ValueError("syntax error. Only one of EX or PX is allowed")
                 px = params.get(b"PX")
@@ -529,6 +555,28 @@ async def _execute_command(
             case [b"ZREM", key, *members]:
                 removed_count = handle_zrem_command(key, members)
                 response = parser.encode_integer(removed_count)
+            case [b"GEOADD", key, longitude, latitude, member]:
+                num_added = handle_geoadd_command(key, float(longitude), float(latitude), member)
+                response = parser.encode_integer(num_added)
+            case [b"GEOPOS", key, *members]:
+                positions = handle_geopos_command(key, members)
+                print(positions)
+                response = parser.encode_array(positions)
+            case [b"GEODIST", key, member1, member2]:
+                distance = handle_geodist_command(key, member1, member2)
+                response = parser.encode_bulk_string(str(distance).encode()) if distance is not None else parser.encode_null()
+            case [b"GEOSEARCH", key, *args]:
+                search_mode = args[0]
+                if search_mode.upper() != b'FROMLONLAT':
+                    raise RESPError("only FROMLONLAT is supported")
+                longitude, latitude = args[1], args[2]
+                search_opt = args[3]
+                if search_opt.upper() != b"BYRADIUS":
+                    raise RESPError("only BYRADIUS is supported")
+                radius, unit = args[4], args[5]
+                members = handle_geosearch_command(key, longitude, latitude, radius, unit)
+                response = parser.encode_array(members)
+
             case [_, *_]:
                 response = parser.encode_simple_error("unknown command")
     except (ValueError, TypeError, RESPError, AssertionError) as e:

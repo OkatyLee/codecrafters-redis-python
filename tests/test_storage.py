@@ -1,11 +1,9 @@
 from unittest.mock import patch
 import os
 import tempfile
-import time as time_module
 
-import pytest
+import pytest # pyright: ignore[reportMissingImports] 
 
-from app import storage
 from app.parser import RESPError
 from app.storage import CacheStorage
 
@@ -593,3 +591,123 @@ def test_zrem():
     result = storage.zrem(b"zset_key", [b"qux", b"baz"])
     assert result == 2
     assert storage.get(b"zset_key") == {}
+
+
+def test_geoadd_geopos():
+    storage = CacheStorage()
+    test_cases = [
+        {"name": "Bangkok", "latitude": 13.7220, "longitude": 100.5252, "score": 3962257306574459.0},
+        {"name": "Beijing", "latitude": 39.9075, "longitude": 116.3972, "score": 4069885364908765.0},
+        {"name": "Berlin", "latitude": 52.5244, "longitude": 13.4105, "score": 3673983964876493.0},
+        {"name": "Copenhagen", "latitude": 55.6759, "longitude": 12.5655, "score": 3685973395504349.0},
+        {"name": "New Delhi", "latitude": 28.6667, "longitude": 77.2167, "score": 3631527070936756.0},
+        {"name": "Kathmandu", "latitude": 27.7017, "longitude": 85.3206, "score": 3639507404773204.0},
+        {"name": "London", "latitude": 51.5074, "longitude": -0.1278, "score":  2163557714755072.0},
+        {"name": "New York", "latitude": 40.7128, "longitude": -74.0060, "score": 1791873974549446.0},
+        {"name": "Paris", "latitude": 48.8534, "longitude": 2.3488, "score": 3663832752681684.0},
+        {"name": "Sydney", "latitude": -33.8688, "longitude": 151.2093, "score": 3252046221964352.0},
+        {"name": "Tokyo", "latitude": 35.6895, "longitude": 139.6917, "score": 4171231230197045.0},
+        {"name": "Vienna", "latitude": 48.2064, "longitude": 16.3707, "score": 3673109836391743.0},
+    ]
+
+    for test_case in test_cases:
+        member, latitude, longitude, desired_score = test_case['name'], test_case['latitude'], test_case['longitude'], test_case['score']
+        storage.geoadd(b"geo_key", float(longitude), float(latitude), member.encode())
+        sorted_set = storage.get(b"geo_key")
+        assert isinstance(sorted_set, dict)
+        actual_score = sorted_set.get(member.encode())
+        assert actual_score == desired_score
+        actual_location = storage.geopos(b"geo_key", [member.encode()])
+        assert actual_location is not None
+        assert actual_location[0] is not None
+        actual_location = [float(x) for x in actual_location[0] if x is not None]
+        assert actual_location == pytest.approx([longitude, latitude], abs=1e-5)
+
+
+def test_geoadd_existing_member_returns_zero_and_updates_position():
+    storage = CacheStorage()
+
+    first_result = storage.geoadd(b"geo_key", 13.361389, 38.115556, b"foo")
+    second_result = storage.geoadd(b"geo_key", 15.087269, 37.502669, b"foo")
+    positions = storage.geopos(b"geo_key", [b"foo"])
+
+    assert first_result == 1
+    assert second_result == 0
+    assert positions is not None
+    assert [float(value) for value in positions[0]] == pytest.approx([15.087269, 37.502669], abs=1e-5)  # type: ignore[arg-type]
+
+
+def test_geopos_multiple_members_and_missing_member():
+    storage = CacheStorage()
+    storage.geoadd(b"geo_key", 13.361389, 38.115556, b"foo")
+    storage.geoadd(b"geo_key", 15.087269, 37.502669, b"bar")
+
+    positions = storage.geopos(b"geo_key", [b"foo", b"bar", b"missing"])
+
+    assert positions is not None
+    assert len(positions) == 3
+    assert positions[2] is None
+    assert [float(value) for value in positions[0]] == pytest.approx([13.361389, 38.115556], abs=1e-5)  # type: ignore[arg-type]
+    assert [float(value) for value in positions[1]] == pytest.approx([15.087269, 37.502669], abs=1e-5)  # type: ignore[arg-type]
+
+
+def test_geopos_missing_key_returns_nulls():
+    storage = CacheStorage()
+
+    assert storage.geopos(b"missing", [b"foo", b"bar"]) == [None, None]
+
+
+def test_geopos_wrongtype_raises_error():
+    storage = CacheStorage()
+    storage.set(b"not-geo", b"value")
+
+    with pytest.raises(TypeError, match="WRONGTYPE"):
+        storage.geopos(b"not-geo", [b"foo"])
+
+
+def test_geodist_returns_distance_between_members():
+    storage = CacheStorage()
+    storage.geoadd(b"geo_key", 13.361389, 38.115556, b"Palermo")
+    storage.geoadd(b"geo_key", 15.087269, 37.502669, b"Catania")
+
+    result = storage.geodist(b"geo_key", b"Palermo", b"Catania")
+
+    assert result == pytest.approx(166274.15157, abs=1e-2)
+
+
+def test_geodist_missing_member_returns_none():
+    storage = CacheStorage()
+    storage.geoadd(b"geo_key", 13.361389, 38.115556, b"Palermo")
+
+    assert storage.geodist(b"geo_key", b"Palermo", b"Missing") is None
+
+
+def test_geosearch_fromlonlat_byradius_returns_members_in_range():
+    storage = CacheStorage()
+    storage.geoadd(b"geo_key", 13.361389, 38.115556, b"Palermo")
+    storage.geoadd(b"geo_key", 15.087269, 37.502669, b"Catania")
+    storage.geoadd(b"geo_key", 12.496366, 41.902782, b"Rome")
+
+    result = storage.geosearch(b"geo_key", b"13.361389", b"38.115556", b"200", b"km")
+
+    assert result == [b"Palermo", b"Catania"]
+
+
+def test_geosearch_missing_key_returns_empty_list():
+    storage = CacheStorage()
+
+    assert storage.geosearch(b"missing", b"13.361389", b"38.115556", b"200", b"km") == []
+
+
+def test_wrong_geoadd():
+    storage = CacheStorage()
+    try:
+        storage.geoadd(b"geo_key", 190.0, 38.115556, b"Palermo")
+        assert False, "Expected ValueError"
+    except ValueError:
+        pass
+    try:
+        storage.geoadd(b"geo_key", 0, 188.115556, b"Palermo")
+        assert False, "Expected ValueError"
+    except ValueError:
+        pass

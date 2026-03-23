@@ -148,7 +148,11 @@ async def replication_handshake_and_loop(
         print(f"Replication error: {e}")
     finally:
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            # Peer may drop/reset TCP connection during shutdown (common on Windows).
+            pass
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
 import asyncio
 import os
 import tempfile
+from typing import cast
 
-import pytest
+import pytest    # pyright: ignore[reportMissingImports]
 
 from app.config import ServerConfig
 from app.handlers import handle_client
@@ -183,6 +184,33 @@ async def test_handle_client_set_with_px_expires():
         reader,
         writer,
         b"*5\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n$2\r\nPX\r\n$2\r\n50\r\n",
+    )
+    await asyncio.sleep(0.07)
+    get_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+    )
+
+    assert set_response == b"+OK\r\n"
+    assert get_response == b"$-1\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_handle_client_set_with_lowercase_px_expires():
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    set_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n$2\r\npx\r\n$2\r\n50\r\n",
     )
     await asyncio.sleep(0.07)
     get_response = await send_command_and_read_response(
@@ -1094,6 +1122,71 @@ async def test_master_propagates_set_to_multiple_replicas():
     await server.wait_closed()
 
 
+async def _read_replica_command(reader: asyncio.StreamReader) -> list[bytes]:
+    parsed = await RESPParser(reader).parse()
+    assert isinstance(parsed, list)
+    assert all(isinstance(part, bytes) for part in parsed)
+    return cast(list[bytes], parsed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setup_commands", "command", "expected_response", "expected_replica_command"),
+    [
+        pytest.param((), [b"LPUSH", b"mylist", b"hello"], b":1\r\n", [b"LPUSH", b"mylist", b"hello"], id="lpush"),
+        pytest.param((), [b"RPUSH", b"mylist", b"a", b"b"], b":2\r\n", [b"RPUSH", b"mylist", b"a", b"b"], id="rpush"),
+        pytest.param(([b"RPUSH", b"mylist", b"a", b"b"],), [b"LPOP", b"mylist"], b"$1\r\na\r\n", [b"LPOP", b"mylist"], id="lpop"),
+        pytest.param((), [b"XADD", b"mystream", b"1-1", b"f", b"v"], b"+1-1\r\n", [b"XADD", b"mystream", b"1-1", b"f", b"v"], id="xadd"),
+        pytest.param((), [b"INCR", b"counter"], b":1\r\n", [b"INCR", b"counter"], id="incr"),
+        pytest.param(([b"SET", b"key", b"value"],), [b"DEL", b"key"], b"+OK\r\n", [b"DEL", b"key"], id="del"),
+        pytest.param((), [b"ZADD", b"zset_key", b"1.0", b"foo"], b":1\r\n", [b"ZADD", b"zset_key", b"1.0", b"foo"], id="zadd"),
+        pytest.param(([b"ZADD", b"zset_key", b"1.0", b"foo"],), [b"ZREM", b"zset_key", b"foo"], b":1\r\n", [b"ZREM", b"zset_key", b"foo"], id="zrem"),
+        pytest.param((), [b"GEOADD", b"geo_key", b"13.361389", b"38.115556", b"foo"], b":1\r\n", [b"GEOADD", b"geo_key", b"13.361389", b"38.115556", b"foo"], id="geoadd"),
+    ],
+)
+async def test_master_propagates_other_write_commands_to_replica(
+    setup_commands,
+    command,
+    expected_response,
+    expected_replica_command,
+):
+    from app.handlers import encode_command_as_resp_array
+
+    config = ServerConfig("127.0.0.1", 0)
+    server = await asyncio.start_server(_make_server_with_config(config), "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    replica_reader, replica_writer = await _connect_replica(addr, config)
+    client_reader, client_writer = await asyncio.open_connection(*addr)
+
+    try:
+        for setup_command in setup_commands:
+            setup_response = await send_command_and_read_response(
+                client_reader,
+                client_writer,
+                encode_command_as_resp_array(setup_command),
+            )
+            assert not setup_response.startswith(b"-")
+            assert await _read_replica_command(replica_reader) == list(setup_command)
+
+        response = await send_command_and_read_response(
+            client_reader,
+            client_writer,
+            encode_command_as_resp_array(command),
+        )
+        replicated_command = await _read_replica_command(replica_reader)
+
+        assert response == expected_response
+        assert replicated_command == expected_replica_command
+    finally:
+        client_writer.close()
+        await client_writer.wait_closed()
+        replica_writer.close()
+        await replica_writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+
+
 # ---------------------------------------------------------------------------
 # WAIT command tests
 # ---------------------------------------------------------------------------
@@ -1910,4 +2003,337 @@ async def test_sorted_set_command_zrem():
     server.close()
     await server.wait_closed()
 
+    
+# ------------------------------- GEOSPARTIAL TESTS -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_geospatial_command_geoadd_geopos():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+    geoadd_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$6\r\nGEOADD\r\n$7\r\ngeo_key\r\n$9\r\n13.361389\r\n$9\r\n38.115556\r\n$3\r\nfoo\r\n"
+    )
+    assert geoadd_result == b":1\r\n"
+    geopos_result = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*3\r\n$6\r\nGEOPOS\r\n$7\r\ngeo_key\r\n$3\r\nfoo\r\n"
+    )
+    assert isinstance(geopos_result, list)
+    assert len(geopos_result) == 1
+    assert isinstance(geopos_result[0], list)
+    assert all(isinstance(val, bytes) for val in geopos_result[0])
+    actual_res = [float(geopos_result[0][0].decode()), float(geopos_result[0][1].decode())] # type: ignore
+    assert actual_res == pytest.approx([13.361389, 38.115556], abs=1e-5)
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+    
+    
+@pytest.mark.asyncio
+async def test_geospatial_command_zadd_geopos():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+    zadd_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$4\r\nZADD\r\n$8\r\nzset_key\r\n$16\r\n3663832614298053\r\n$3\r\nfoo\r\n"
+    )
+    assert zadd_result == b":1\r\n"
+    geopos_result = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*3\r\n$6\r\nGEOPOS\r\n$8\r\nzset_key\r\n$3\r\nfoo\r\n"
+    )
+    assert isinstance(geopos_result, list)
+    assert len(geopos_result) == 1
+    assert isinstance(geopos_result[0], list)
+    assert all(isinstance(val, bytes) for val in geopos_result[0])
+    actual_res = [float(geopos_result[0][0].decode()), float(geopos_result[0][1].decode())] # type: ignore
+    assert actual_res == pytest.approx([2.294471561908722, 48.85846255040141], abs=1e-5)
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_geospatial_command_geopos_multiple_members_and_missing_member():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+
+    first_add = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$6\r\nGEOADD\r\n$7\r\ngeo_key\r\n$9\r\n13.361389\r\n$9\r\n38.115556\r\n$3\r\nfoo\r\n",
+    )
+    second_add = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$6\r\nGEOADD\r\n$7\r\ngeo_key\r\n$9\r\n15.087269\r\n$9\r\n37.502669\r\n$3\r\nbar\r\n",
+    )
+
+    assert first_add == b":1\r\n"
+    assert second_add == b":1\r\n"
+
+    geopos_result = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*5\r\n$6\r\nGEOPOS\r\n$7\r\ngeo_key\r\n$3\r\nfoo\r\n$3\r\nbar\r\n$7\r\nmissing\r\n",
+    )
+
+    assert isinstance(geopos_result, list)
+    assert len(geopos_result) == 3
+    assert geopos_result[2] is None
+
+    foo_coords = [float(geopos_result[0][0].decode()), float(geopos_result[0][1].decode())]  # type: ignore[index]
+    bar_coords = [float(geopos_result[1][0].decode()), float(geopos_result[1][1].decode())]  # type: ignore[index]
+
+    assert foo_coords == pytest.approx([13.361389, 38.115556], abs=1e-5)
+    assert bar_coords == pytest.approx([15.087269, 37.502669], abs=1e-5)
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_geospatial_command_geopos_missing_key_returns_nulls():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+
+    geopos_result = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nGEOPOS\r\n$7\r\ngeo_key\r\n$3\r\nfoo\r\n$3\r\nbar\r\n",
+    )
+
+    assert geopos_result == [None, None]
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_geospatial_command_geoadd_invalid_coordinates_returns_error():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+
+    invalid_longitude_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$6\r\nGEOADD\r\n$7\r\ngeo_key\r\n$3\r\n181\r\n$9\r\n38.115556\r\n$3\r\nfoo\r\n",
+    )
+
+    assert invalid_longitude_result == b"-ERR invalid longitude,latitude pair 181.0,38.115556\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_geospatial_command_geopos_wrongtype_returns_error_for_string_key():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$3\r\nSET\r\n$7\r\nstr_key\r\n$5\r\nvalue\r\n",
+    )
+
+    wrongtype_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*3\r\n$6\r\nGEOPOS\r\n$7\r\nstr_key\r\n$3\r\nfoo\r\n",
+    )
+
+    expected = b"-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+    assert wrongtype_result == expected
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_geospatial_command_geodist():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$6\r\nGEOADD\r\n$7\r\ngeo_key\r\n$9\r\n13.361389\r\n$9\r\n38.115556\r\n$7\r\nPalermo\r\n",
+    )
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$6\r\nGEOADD\r\n$7\r\ngeo_key\r\n$9\r\n15.087269\r\n$9\r\n37.502669\r\n$7\r\nCatania\r\n",
+    )
+
+    geodist_result = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*4\r\n$7\r\nGEODIST\r\n$7\r\ngeo_key\r\n$7\r\nPalermo\r\n$7\r\nCatania\r\n",
+    )
+
+    assert isinstance(geodist_result, bytes)
+    assert float(geodist_result.decode()) == pytest.approx(166274.15157, abs=1e-2)
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_geospatial_command_geodist_missing_member_returns_null():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$6\r\nGEOADD\r\n$7\r\ngeo_key\r\n$9\r\n13.361389\r\n$9\r\n38.115556\r\n$7\r\nPalermo\r\n",
+    )
+
+    geodist_result = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*4\r\n$7\r\nGEODIST\r\n$7\r\ngeo_key\r\n$7\r\nPalermo\r\n$7\r\nMissing\r\n",
+    )
+
+    assert geodist_result == b"$-1\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_geospatial_command_geosearch_fromlonlat_byradius():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$6\r\nGEOADD\r\n$7\r\ngeo_key\r\n$9\r\n13.361389\r\n$9\r\n38.115556\r\n$7\r\nPalermo\r\n",
+    )
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$6\r\nGEOADD\r\n$7\r\ngeo_key\r\n$9\r\n15.087269\r\n$9\r\n37.502669\r\n$7\r\nCatania\r\n",
+    )
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$6\r\nGEOADD\r\n$7\r\ngeo_key\r\n$9\r\n12.496366\r\n$9\r\n41.902782\r\n$4\r\nRome\r\n",
+    )
+
+    geosearch_result = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*8\r\n$9\r\nGEOSEARCH\r\n$7\r\ngeo_key\r\n$10\r\nFROMLONLAT\r\n$9\r\n13.361389\r\n$9\r\n38.115556\r\n$8\r\nBYRADIUS\r\n$3\r\n200\r\n$2\r\nkm\r\n",
+    )
+
+    assert geosearch_result == [b"Palermo", b"Catania"]
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_geospatial_command_geosearch_missing_key_returns_empty_array():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+    reader, writer = await asyncio.open_connection(*addr)
+
+    geosearch_result = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*8\r\n$9\r\nGEOSEARCH\r\n$7\r\ngeo_key\r\n$10\r\nFROMLONLAT\r\n$9\r\n13.361389\r\n$9\r\n38.115556\r\n$8\r\nBYRADIUS\r\n$3\r\n200\r\n$2\r\nkm\r\n",
+    )
+
+    assert geosearch_result == []
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
     

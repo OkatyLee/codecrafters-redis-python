@@ -386,6 +386,24 @@ class CacheStorage:
     def zrem(self, key: RedisKey, members: list[bytes]) -> int:
         """Remove members from the sorted set at key."""
         return self._sset.zrem(key, members)
+    
+    def geoadd(self, key: RedisKey, longitude: float, latitude: float, member: bytes) -> int:
+        """Add a member to a geospatial index."""
+        return self._sset.geoadd(key, longitude, latitude, member)
+    
+    def geopos(self, key: RedisKey, members: list[bytes]) -> list[list[bytes] | None]:
+        """Return the positions of members in the geospatial index at key."""
+        return self._sset.geopos(key, members)
+
+    def geodist(self, key: RedisKey, member1: bytes, member2: bytes) -> float | None:
+        """Return the distance between two members in the geospatial index at key."""
+        return self._sset.geodist(key, member1, member2)
+
+    def geosearch(self, key: RedisKey, longitude: bytes, latitude: bytes, radius: bytes, unit: bytes) -> list[bytes]:
+        """Search for members in the geospatial index at key within a given radius."""
+        return self._sset.geosearch(key, longitude, latitude, radius, unit)
+
+
 
 
 def _crc64(data: bytes) -> int:

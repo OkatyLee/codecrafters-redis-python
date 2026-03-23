@@ -3,9 +3,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from time import time
 from typing import Any, Callable
-import heapq
 
-from dataclasses import dataclass
 from app.parser import RESPError
 
 type RedisKey = bytes | str
@@ -363,6 +361,150 @@ class SortedSetType(ValueType):
                 removed_count += 1
         self._set_value(key, sorted_set)
         return removed_count
+    
+    MIN_LATITUDE = -85.05112878
+    MAX_LATITUDE = 85.05112878
+    MIN_LONGITUDE = -180
+    MAX_LONGITUDE = 180
+    
+    def geoadd(self, key: RedisKey, longitude: float, latitude: float, member: bytes) -> int:
+        sorted_set = self._get_value(key)
+        if sorted_set is None:
+            sorted_set = {}
+        if not isinstance(sorted_set, dict):
+            raise TypeError(WRONGTYPE_ERROR)
+        if abs(longitude) > self.MAX_LONGITUDE or abs(latitude) > self.MAX_LATITUDE:
+            raise ValueError(f"invalid longitude,latitude pair {longitude},{latitude}")
+        is_exiting = member in sorted_set
+        sorted_set[member] = self._encode_geoloc(longitude, latitude)
+        self._set_value(key, sorted_set)
+        return 1 if not is_exiting else 0
+
+    def geopos(self, key: RedisKey, members: list[bytes]) -> list[list[bytes] | None]:
+        sorted_set = self._get_value(key)
+        if sorted_set is None:
+            return [None for _ in members]
+        if not isinstance(sorted_set, dict):
+            raise TypeError(WRONGTYPE_ERROR)
+        scores = []
+        for mem in members:
+            raw_score = sorted_set.get(mem)
+            if raw_score is None:
+                scores.append(None)
+                continue
+            try:
+                score = int(raw_score)
+            except:
+                score = None
+            scores.append(score)
+        return [
+            [str(pos).encode() for pos in self._decode_to_geoloc(score)] 
+            if score is not None else None
+            for score in scores
+        ]
+
+    def geodist(self, key: RedisKey, member1: bytes, member2: bytes) -> float | None:
+        sorted_set = self._get_value(key)
+        if sorted_set is None:
+            return None
+        if not isinstance(sorted_set, dict):
+            raise TypeError(WRONGTYPE_ERROR)
+        score1 = sorted_set.get(member1)
+        score2 = sorted_set.get(member2)
+        if score1 is None or score2 is None:
+            return None
+        try:
+            geo_code1 = int(score1)
+            geo_code2 = int(score2)
+        except (ValueError, TypeError):
+            raise TypeError(WRONGTYPE_ERROR)
+        lon1, lat1 = self._decode_to_geoloc(geo_code1)
+        lon2, lat2 = self._decode_to_geoloc(geo_code2)
+        # Simplified distance calculation (not accurate for real-world use)
+        return self._haversine(lat1, lon1, lat2, lon2)
+
+    def geosearch(self, key: RedisKey, longitude: bytes, latitude: bytes, radius: bytes, unit: bytes) -> list[bytes]:
+        to_meters = {
+                    b'km': 1000.0,
+                    b'ft': 0.3048,
+                    b'in': 0.0254,
+                    b'mi': 1609.34,
+                    b'cm': 0.01,
+                    b'mm': 0.001,
+                    b'm': 1.0
+        }
+        norm_radius = float(radius.decode()) * to_meters.get(unit.lower(), 1.0)
+        res = []
+        sorted_set = self._get_value(key)
+        if sorted_set is None:
+            return []
+        if not isinstance(sorted_set, dict):
+            raise TypeError(WRONGTYPE_ERROR)
+        for member, score in sorted_set.items():
+            if not isinstance(member, bytes):
+                raise TypeError(WRONGTYPE_ERROR)
+            try:
+                lon2, lat2 = self._decode_to_geoloc(int(score))
+            except (TypeError, ValueError):
+                raise TypeError(WRONGTYPE_ERROR)
+            lon1, lat1 = float(longitude.decode()), float(latitude.decode())
+            dist = self._haversine(lat1, lon1, lat2, lon2)
+            if dist < norm_radius:
+                res.append(member)
+        return res
+
+
+    def _haversine(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        from math import radians, sin, cos, asin, sqrt
+        R = 6372797.560856  # Earth radius in meters
+
+        dLat = radians(lat2 - lat1)
+        dLon = radians(lon2 - lon1)
+        lat1 = radians(lat1)
+        lat2 = radians(lat2)
+
+        a = sin(dLat / 2)**2 + cos(lat1) * cos(lat2) * sin(dLon / 2)**2
+        c = 2 * asin(sqrt(a))
+
+        return R * c
+
+    def _encode_geoloc(self, longitude: float, latitude: float) -> int:
+        lon = self._interleave(longitude, self.MIN_LONGITUDE, self.MAX_LONGITUDE)
+        lat = self._interleave(latitude, self.MIN_LATITUDE, self.MAX_LATITUDE)
+        res = ""
+        for i in range(26):
+            res += lon[i] + lat[i]
+        return int(res, 2)
+
+    def _interleave(self, x: float, min_val: float, max_val: float) -> str:
+        bits = ""
+        for _ in range(26):
+            mid = min_val + (max_val - min_val) / 2
+            if x >= mid:
+                bits += "1"
+                min_val = mid
+            else:
+                bits += "0"
+                max_val = mid
+        return bits
+
+    def _decode_to_geoloc(self, geo_code: int) -> list[float]:
+        bits_geocode = bin(geo_code)[2:].zfill(52)  # Convert to 52-bit binary string
+        latitude_bits = bits_geocode[1::2]  
+        longitude_bits = bits_geocode[::2] 
+        latitude = self._deinterleave(latitude_bits, self.MIN_LATITUDE, self.MAX_LATITUDE)
+        longitude = self._deinterleave(longitude_bits, self.MIN_LONGITUDE, self.MAX_LONGITUDE)
+        return [longitude, latitude]
+
+    def _deinterleave(self, bits: str, min_val: float, max_val: float) -> float:
+        for bit in bits:
+            mid = (max_val + min_val) / 2
+            if bit == "1":
+                min_val = mid
+            else:
+                max_val = mid
+        return (min_val + max_val) / 2
+
 
 
 class StringType(ValueType):

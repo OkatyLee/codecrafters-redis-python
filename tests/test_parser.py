@@ -1,6 +1,6 @@
 import asyncio
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 
 from app.parser import RESPError, RESPParser
 

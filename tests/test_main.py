@@ -1,10 +1,9 @@
 import argparse
 import asyncio
 import tempfile
-import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 
 import app.storage
 from app.config import ServerConfig

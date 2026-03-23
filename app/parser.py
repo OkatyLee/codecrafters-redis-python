@@ -7,6 +7,7 @@ errors in the subset required by the exercises.
 
 import asyncio
 from collections.abc import Sequence
+from turtle import reset
 
 type RESPPrimitive = bytes | str | int | None
 type RESPValue = RESPPrimitive | list["RESPValue"] | dict[bytes | str, "RESPValue"]
@@ -151,6 +152,8 @@ class RESPParser:
             elif isinstance(value, dict):
                 val = [item for k, v in value.items() for item in (k, v)]
                 result += self.encode_array(val)
+            elif value is None:
+                result += self.encode_null_array()
             else:
                 raise TypeError(f"Unsupported value type: {type(value)}")
         return result
