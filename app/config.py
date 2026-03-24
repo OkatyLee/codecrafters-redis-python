@@ -2,6 +2,8 @@ import asyncio
 from collections import defaultdict
 from random import randint
 
+from app.session import ACLUser
+
 
 class ServerConfig:
     def __init__(self, host: str, port: int, replicaof: str | None = None, dir: str = "tmp/files", dbfilename: str = "dump.rdb"):
@@ -20,6 +22,10 @@ class ServerConfig:
         self.replica_ack_offsets: dict[asyncio.StreamWriter, int] = {}
         # channel -> set of subscribed writers
         self.pubsub: defaultdict[bytes, set[asyncio.StreamWriter]] = defaultdict(set)
+        self.acl_users: dict[str, ACLUser] = {
+            "default": ACLUser("default", enabled=True, nopass=True)
+        }
+
 
     def register_replica(self, port: int | None, writer: asyncio.StreamWriter | None) -> None:
         if port is not None and port not in self.replicas_ports:
@@ -51,3 +57,12 @@ class ServerConfig:
             return
         self.replica_ack_offsets[writer] = offset
         
+    def get_acl_user(self, username: str) -> ACLUser | None:
+        return self.acl_users.get(username)
+
+    def ensure_acl_user(self, username: str) -> ACLUser:
+        user = self.acl_users.get(username)
+        if user is None:
+            user = ACLUser(username)
+            self.acl_users[username] = user
+        return user

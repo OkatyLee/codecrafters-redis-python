@@ -1,7 +1,8 @@
 import asyncio
 from collections.abc import Sequence
+from hashlib import sha256
 import os
-from app import config
+from app.session import ClientSession
 from app.commands import COMMAND_WRITE_FLAGS, ExecCtx, redis_command
 from app.config import ServerConfig
 from app.parser import RESPError, RESPParser
@@ -9,6 +10,7 @@ from app.storage import get_storage
 
 EMPTY_RDB_HEX = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2"
 EMPTY_RDB_BYTES = bytes.fromhex(EMPTY_RDB_HEX)
+ALLOWED_BEFORE_AUTH = {b"AUTH"}
 
 
 def encode_command_as_resp_array(command: Sequence[bytes]) -> bytes:
@@ -24,12 +26,14 @@ def build_exec_ctx(
     *,
     from_replication: bool,
     replica_writer: asyncio.StreamWriter | None = None,
+    session: ClientSession | None = None
 ) -> ExecCtx:
     return ExecCtx(
         from_replication=from_replication,
         raw_resp_command=encode_command_as_resp_array(command),
         propagate=lambda payload, cfg=config: propagate_to_replicas(cfg, payload),
         replica_writer=replica_writer,
+        session=session,
     )
 
 
@@ -345,6 +349,48 @@ def _encode_raw_resp_array(responses: Sequence[bytes]) -> bytes:
     return b"*" + str(len(responses)).encode() + b"\r\n" + b"".join(responses)
 
 
+def _requires_auth(
+    command: list[bytes],
+    config: ServerConfig | None,
+    session: ClientSession | None,
+) -> bool:
+    if config is None or session is None:
+        return False
+    if session.is_authenticated:
+        return False
+    return command[0].upper() not in ALLOWED_BEFORE_AUTH
+
+
+def handle_acl_setuser_command(args: list[bytes], config: ServerConfig, parser: RESPParser) -> bytes:
+    if len(args) != 2:
+        return parser.encode_simple_error("wrong number of arguments for 'ACL SETUSER'")
+
+    username, password = args[0], args[1]
+    if not password.startswith(b'>'):
+        
+        return parser.encode_simple_error("invalid password format for 'ACL SETUSER'")
+
+    user = config.ensure_acl_user(username.decode())
+    hashed_password = sha256(password[1:]).digest()
+    user.passwords.add(hashed_password)
+    user.nopass = False
+    return parser.encode_simple_string("OK")
+
+
+def handle_acl_getuser_command(username: bytes, config: ServerConfig, parser: RESPParser) -> bytes:
+    user = config.get_acl_user(username.decode())
+    if user is None:
+        return parser.encode_null_array()
+    else:
+        response_array: list[bytes | list[bytes]] = []
+        response_array.append(b"flags")
+        response_array.append([b"nopass"] if user.nopass else [])
+        response_array.append(b"password")
+        response_array.append([p for p in user.passwords] if len(user.passwords) > 0 else [])
+
+        return parser.encode_array(response_array)
+    
+
 async def _execute_command(
     command: list[bytes],
     parser: RESPParser,
@@ -576,6 +622,35 @@ async def _execute_command(
                 radius, unit = args[4], args[5]
                 members = handle_geosearch_command(key, longitude, latitude, radius, unit)
                 response = parser.encode_array(members)
+            case [b"ACL", *args]:
+                assert config is not None
+                assert ctx.session is not None
+                assert len(args) > 0
+                
+                match args[0].upper():
+                    
+                    case b"WHOAMI":
+                        username = ctx.session.current_username if ctx.session.current_username else "default" 
+                        response = parser.encode_bulk_string(username.encode())
+                        
+                    case b"GETUSER":
+                        response = handle_acl_getuser_command(args[1], config, parser)
+
+                    case b"SETUSER":
+                        response = handle_acl_setuser_command(args[1:], config, parser)
+
+            case [b"AUTH", *args]:
+                assert config is not None
+                assert ctx.session is not None
+                assert len(args) in [1, 2]
+                
+                username, password = (args[0], args[1]) if len(args) == 2 else (b"default", args[0])
+                user = config.get_acl_user(username.decode())
+                if user is None or not user.check_password(password):
+                    response = parser.encode_simple_error("WRONGPASS invalid username-password pair or user is disabled.")
+                else:
+                    ctx.session.login(user.name)
+                    response = parser.encode_simple_string("OK")
 
             case [_, *_]:
                 response = parser.encode_simple_error("unknown command")
@@ -597,13 +672,14 @@ async def handle_client(
     writer: asyncio.StreamWriter,
     config: ServerConfig | None = None,
 ) -> None:
+    if config is None:
+        config = ServerConfig("127.0.0.1", 0)
+
     addr = writer.get_extra_info("peername")
     print(f"Connected to client at {addr}")
     parser = RESPParser(reader)
-    in_multi = False
-    queued_commands: list[list[bytes]] = []
-    in_subscribe_mode = False
-    subscribed_channels: set[bytes] = set()
+    default_user = config.get_acl_user("default")
+    session = ClientSession.create(default_user)
     try:
         while True:
             data = await parser.parse()
@@ -616,22 +692,27 @@ async def handle_client(
                 continue
 
             command = _normalize_command(data)
-
+            if _requires_auth(command, config, session):
+                response = parser.encode_simple_error("NOAUTH  Authentication required.")
+                writer.write(response)
+                await writer.drain()
+                continue
+            
             match command:
                 case [b"MULTI"]:
-                    if in_multi:
+                    if session.in_multi:
                         response = parser.encode_simple_error("MULTI calls can not be nested")
                     else:
-                        in_multi = True
-                        queued_commands.clear()
+                        session.in_multi = True
+                        session.queued_commands.clear()
                         response = parser.encode_simple_string("OK")
                 case [b"EXEC"]:
-                    if not in_multi:
+                    if not session.in_multi:
                         response = parser.encode_simple_error("EXEC without MULTI")
                     else:
-                        commands_to_execute = queued_commands.copy()
-                        queued_commands.clear()
-                        in_multi = False
+                        commands_to_execute = session.queued_commands.copy()
+                        session.queued_commands.clear()
+                        session.in_multi = False
                         responses: list[bytes] = []
                         for queued in commands_to_execute:
                             queued_ctx = build_exec_ctx(
@@ -639,17 +720,18 @@ async def handle_client(
                                 config,
                                 from_replication=False,
                                 replica_writer=writer,
+                                session=session
                             )
                             responses.append(
                                 await _execute_command(queued, parser, config, queued_ctx)
                             )
                         response = _encode_raw_resp_array(responses)
                 case [b"DISCARD"]:
-                    if not in_multi:
+                    if not session.in_multi:
                         response = parser.encode_simple_error("DISCARD without MULTI")
                     else:
-                        queued_commands.clear()
-                        in_multi = False
+                        session.queued_commands.clear()
+                        session.in_multi = False
                         response = parser.encode_simple_string("OK")
                 case [b"SUBSCRIBE", *channels]:
                     assert config is not None
@@ -660,26 +742,26 @@ async def handle_client(
                         for channel in channels:
                             ch = channel if isinstance(channel, bytes) else str(channel).encode()
                             config.pubsub[ch].add(writer)
-                            subscribed_channels.add(ch)
-                            combined += parser.encode_array([b"subscribe", ch, len(subscribed_channels)])
-                        in_subscribe_mode = True
+                            session.subscribed_channels.add(ch)
+                            combined += parser.encode_array([b"subscribe", ch, len(session.subscribed_channels)])
+                        session.in_subscribed_mode = True
                         response = combined
                 case [b"UNSUBSCRIBE", *channels]:
                     assert config is not None
                     targets = (
                         [c if isinstance(c, bytes) else str(c).encode() for c in channels]
-                        if channels else list(subscribed_channels)
+                        if channels else list(session.subscribed_channels)
                     )
                     combined = b""
                     for ch in targets:
-                        subscribed_channels.discard(ch)
+                        session.subscribed_channels.discard(ch)
                         config.pubsub[ch].discard(writer)
-                        combined += parser.encode_array([b"unsubscribe", ch, len(subscribed_channels)])
-                    if not subscribed_channels:
-                        in_subscribe_mode = False
+                        combined += parser.encode_array([b"unsubscribe", ch, len(session.subscribed_channels)])
+                    if not session.subscribed_channels:
+                        session.in_subscribed_mode = False
                     response = combined if combined else parser.encode_array([b"unsubscribe", None, 0])
                 case _:
-                    if in_subscribe_mode:
+                    if session.in_subscribed_mode:
                         if command[0] == b"PING":
                             msg = command[1] if len(command) > 1 else b""
                             response = parser.encode_array([b"pong", msg])
@@ -687,8 +769,8 @@ async def handle_client(
                             response = parser.encode_simple_error(
                                 "ERR Command not allowed in subscribe mode"
                             )
-                    elif in_multi:  
-                        queued_commands.append(command)
+                    elif session.in_multi:  
+                        session.queued_commands.append(command)
                         response = parser.encode_simple_string("QUEUED")
                     else:
                         ctx = build_exec_ctx(
@@ -696,6 +778,7 @@ async def handle_client(
                             config,
                             from_replication=False,
                             replica_writer=writer,
+                            session=session
                         )
                         response = await _execute_command(command, parser, config, ctx)
 
@@ -707,7 +790,7 @@ async def handle_client(
         if config is not None:
             if writer in config.replica_writers:
                 config.replica_writers.remove(writer)
-            for ch in subscribed_channels:
+            for ch in session.subscribed_channels:
                 config.pubsub[ch].discard(writer)
         writer.close()
         await writer.wait_closed()

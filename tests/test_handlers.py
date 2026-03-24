@@ -1606,6 +1606,143 @@ async def test_handle_keys_no_match_returns_empty_array():
 
 
 @pytest.mark.asyncio
+async def test_default_user_is_auto_authenticated_with_nopass():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    whoami_response = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*2\r\n$3\r\nACL\r\n$6\r\nWHOAMI\r\n",
+    )
+    ping_response = await send_command_and_read_response(
+        reader,
+        writer,
+        b"*1\r\n$4\r\nPING\r\n",
+    )
+
+    assert whoami_response == b"default"
+    assert ping_response == b"+PONG\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_setting_default_password_requires_auth_for_new_connections_only():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    authed_reader, authed_writer = await asyncio.open_connection(*addr)
+
+    setuser_response = await send_command_and_read_response(
+        authed_reader,
+        authed_writer,
+        b"*4\r\n$3\r\nACL\r\n$7\r\nSETUSER\r\n$7\r\ndefault\r\n$7\r\n>secret\r\n",
+    )
+    old_session_ping = await send_command_and_read_response(
+        authed_reader,
+        authed_writer,
+        b"*1\r\n$4\r\nPING\r\n",
+    )
+    second_reader, second_writer = await asyncio.open_connection(*addr)
+    noauth_response = await send_command_and_read_response(
+        second_reader,
+        second_writer,
+        b"*1\r\n$4\r\nPING\r\n",
+    )
+    wrongpass_response = await send_command_and_read_response(
+        second_reader,
+        second_writer,
+        b"*2\r\n$4\r\nAUTH\r\n$5\r\nwrong\r\n",
+    )
+    auth_response = await send_command_and_read_response(
+        second_reader,
+        second_writer,
+        b"*2\r\n$4\r\nAUTH\r\n$6\r\nsecret\r\n",
+    )
+    whoami_response = await send_command_and_parse_response(
+        second_reader,
+        second_writer,
+        b"*2\r\n$3\r\nACL\r\n$6\r\nWHOAMI\r\n",
+    )
+    ping_after_auth = await send_command_and_read_response(
+        second_reader,
+        second_writer,
+        b"*1\r\n$4\r\nPING\r\n",
+    )
+
+    assert setuser_response == b"+OK\r\n"
+    assert old_session_ping == b"+PONG\r\n"
+    assert noauth_response == b"-ERR NOAUTH  Authentication required.\r\n"
+    assert wrongpass_response == b"-ERR WRONGPASS invalid username-password pair or user is disabled.\r\n"
+    assert auth_response == b"+OK\r\n"
+    assert whoami_response == b"default"
+    assert ping_after_auth == b"+PONG\r\n"
+
+    authed_writer.close()
+    await authed_writer.wait_closed()
+    second_writer.close()
+    await second_writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_acl_setuser_creates_user_and_auth_switches_session_user():
+    config = ServerConfig("127.0.0.1", 0)
+
+    async def handler(reader, writer):
+        await handle_client(reader, writer, config)
+
+    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    addr = server.sockets[0].getsockname()
+
+    admin_reader, admin_writer = await asyncio.open_connection(*addr)
+    user_reader, user_writer = await asyncio.open_connection(*addr)
+
+    setuser_response = await send_command_and_read_response(
+        admin_reader,
+        admin_writer,
+        b"*4\r\n$3\r\nACL\r\n$7\r\nSETUSER\r\n$5\r\nalice\r\n$7\r\n>wonder\r\n",
+    )
+    auth_response = await send_command_and_read_response(
+        user_reader,
+        user_writer,
+        b"*3\r\n$4\r\nAUTH\r\n$5\r\nalice\r\n$6\r\nwonder\r\n",
+    )
+    whoami_response = await send_command_and_parse_response(
+        user_reader,
+        user_writer,
+        b"*2\r\n$3\r\nACL\r\n$6\r\nWHOAMI\r\n",
+    )
+
+    assert setuser_response == b"+OK\r\n"
+    assert auth_response == b"+OK\r\n"
+    assert whoami_response == b"alice"
+
+    admin_writer.close()
+    await admin_writer.wait_closed()
+    user_writer.close()
+    await user_writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_subscribe_returns_confirmation_array():
     config = ServerConfig("127.0.0.1", 0)
 

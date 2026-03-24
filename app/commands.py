@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 from asyncio import StreamWriter
 
+from app.session import ClientSession
+
 type PropagateCallback = Callable[[bytes], Awaitable[None]]
 
 COMMAND_WRITE_FLAGS: dict[bytes, bool] = {}
@@ -27,3 +29,4 @@ class ExecCtx:
     raw_resp_command: bytes
     propagate: PropagateCallback
     replica_writer: StreamWriter | None = None
+    session: ClientSession | None = None
