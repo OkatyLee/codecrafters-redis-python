@@ -4,6 +4,7 @@ import asyncio
 from app.config import ServerConfig
 from app.handlers import _execute_command, build_exec_ctx, encode_command_as_resp_array, handle_client
 from app.parser import RESPParser
+from app.session import ClientSession
 from app.storage import get_storage
 
 
@@ -89,6 +90,7 @@ async def replication_handshake_and_loop(
 ) -> None:
     """Perform replica handshake and apply write commands from master."""
     parser = RESPParser(reader)
+    replication_session = ClientSession.create(config.get_acl_user("default"))
     try:
         print("Starting replication handshake")
 
@@ -139,7 +141,12 @@ async def replication_handshake_and_loop(
             command = [item if isinstance(item, bytes) else str(item).encode() for item in data]
             command[0] = command[0].upper()
             config.increment_replica_repl_offset(len(encode_command_as_resp_array(command)))
-            ctx = build_exec_ctx(command, config, from_replication=True)
+            ctx = build_exec_ctx(
+                command,
+                config,
+                from_replication=True,
+                session=replication_session,
+            )
             response = await _execute_command(command, parser, config, ctx)
             if command[:2] == [b"REPLCONF", b"GETACK"] and response:
                 writer.write(response)

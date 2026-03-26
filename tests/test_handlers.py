@@ -469,7 +469,7 @@ async def test_type_for_string_list_and_stream():
     assert type_str == b"+string\r\n"
     assert type_list == b"+list\r\n"
     assert type_stream == b"+stream\r\n"
-    assert type_missing == b"+None\r\n"
+    assert type_missing == b"+none\r\n"
 
     writer.close()
     await writer.wait_closed()
@@ -782,7 +782,7 @@ async def test_xread_rejects_missing_streams_keyword_with_error_reply():
         b"*3\r\n$5\r\nXREAD\r\n$8\r\nmystream\r\n$3\r\n0-0\r\n",
     )
 
-    assert response == b"-ERR syntax error\r\n"
+    assert response == b"-ERR wrong number of arguments for 'xread' command\r\n"
 
     writer.close()
     await writer.wait_closed()
@@ -802,7 +802,7 @@ async def test_xread_rejects_unbalanced_streams_and_ids_with_error_reply():
         b"*3\r\n$5\r\nXREAD\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n",
     )
 
-    assert response == b"-ERR Unbalanced XREAD list of streams\r\n"
+    assert response == b"-ERR wrong number of arguments for 'xread' command\r\n"
 
     writer.close()
     await writer.wait_closed()

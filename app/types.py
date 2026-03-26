@@ -302,7 +302,7 @@ class SortedSetType(ValueType):
         
     @property
     def name(self): 
-        return "set"
+        return "zset"
     
     def supports(self, value):
         return isinstance(value, (set, dict))
