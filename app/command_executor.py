@@ -34,6 +34,8 @@ def build_exec_ctx(
     connection_writer: asyncio.StreamWriter | None = None,
     session: ClientSession | None = None
 ) -> ExecCtx:
+    from app.replication import propagate_to_replicas
+
     return ExecCtx(
         from_replication=from_replication,
         raw_resp_command=encode_command_as_resp_array(command),
@@ -41,40 +43,6 @@ def build_exec_ctx(
         connection_writer=connection_writer,
         session=session,
     )
-    
-    
-async def propagate_to_replicas(app_state: AppState | None, payload: bytes) -> None:
-    if app_state is None or app_state.config.role != "master" or not app_state.replica_writers:
-        return
-
-    app_state.config.increment_master_repl_offset(len(payload))
-
-    stale_writers: list[asyncio.StreamWriter] = []
-    
-    async def _write_drain(connection_writer: asyncio.StreamWriter, payload: bytes):
-        try:
-            connection_writer.write(payload)
-            await connection_writer.drain()
-        except Exception:
-            stale_writers.append(connection_writer)
-            
-    async with asyncio.TaskGroup() as tg:
-        for connection_writer in list(app_state.replica_writers):
-            tg.create_task(_write_drain(connection_writer, payload))
-
-
-    async def _unregister_stale_replica(stale_writer: asyncio.StreamWriter):
-        app_state.unregister_replica(stale_writer)
-        stale_writer.close()
-        try:
-            await stale_writer.wait_closed()
-        except Exception:
-            pass
-
-    async with asyncio.TaskGroup() as tg:
-        for stale_writer in stale_writers:
-            tg.create_task(_unregister_stale_replica(stale_writer))
-    
 
 def encode_command_as_resp_array(command: Sequence[bytes]) -> bytes:
     payload = b"*" + str(len(command)).encode() + b"\r\n"
