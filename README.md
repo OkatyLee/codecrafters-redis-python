@@ -1,60 +1,86 @@
-[![progress-banner](https://backend.codecrafters.io/progress/redis/e38574d6-de23-4c66-909a-2baced7d572c)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
+# Redis Clone in Python
 
-This is a starting point for Python solutions to the
-["Build Your Own Redis" Challenge](https://codecrafters.io/challenges/redis).
+This repository contains a Redis-like server built for the
+[CodeCrafters "Build Your Own Redis" challenge](https://codecrafters.io/challenges/redis).
 
-In this challenge, you'll build a toy Redis clone that's capable of handling
-basic commands like `PING`, `SET` and `GET`. Along the way we'll learn about
-event loops, the Redis protocol and more.
+The server is implemented in `app/main.py` and speaks the Redis RESP protocol
+over TCP.
 
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
+## Requirements
 
-# Passing the first stage
+- Python 3.14+
+- `uv` for local runs via the provided script
+- Docker (optional, for containerized runs)
 
-The entry point for your Redis implementation is in `app/main.py`. Study and
-uncomment the relevant code, and push your changes to pass the first stage:
+## Run Locally
+
+Start the server with the helper script:
 
 ```sh
-git commit -am "pass 1st stage" # any msg
-git push origin master
+./your_program.sh
 ```
 
-That's all!
+Run it directly with custom options:
 
-# Stage 2 & beyond
-
-Note: This section is for stages 2 and beyond.
-
-1. Ensure you have `uv` installed locally
-1. Run `./your_program.sh` to run your Redis server, which is implemented in
-   `app/main.py`.
-1. Commit your changes and run `git push origin master` to submit your solution
-   to CodeCrafters. Test output will be streamed to your terminal.
-
-# Troubleshooting
-
-## module `socket` has no attribute `create_server`
-
-When running your server locally, you might see an error like this:
-
-```
-Traceback (most recent call last):
-  File "/.../python3.7/runpy.py", line 193, in _run_module_as_main
-    "__main__", mod_spec)
-  File "/.../python3.7/runpy.py", line 85, in _run_code
-    exec(code, run_globals)
-  File "/app/app/main.py", line 11, in <module>
-    main()
-  File "/app/app/main.py", line 6, in main
-    s = socket.create_server(("localhost", 6379), reuse_port=True)
-AttributeError: module 'socket' has no attribute 'create_server'
+```sh
+uv run --quiet -m app.main --host 127.0.0.1 --port 6379
 ```
 
-This is because `socket.create_server` was introduced in Python 3.8, and you
-might be running an older version.
+Available runtime flags:
 
-You can fix this by installing Python 3.8 locally and using that.
+- `--host` - interface to bind to
+- `--port` / `-p` - TCP port to listen on
+- `--replicaof` - start as a replica of `host:port`
+- `--dir` - directory used for persisted files
+- `--dbfilename` - RDB filename inside the data directory
 
-If you'd like to use a different version of Python, change the `buildpack` value
-in `codecrafters.yml`.
+## Run Tests
+
+```sh
+uv run pytest
+```
+
+## Docker
+
+Build the image:
+
+```sh
+docker build -t codecrafters-redis-python .
+```
+
+Run the server in a container:
+
+```sh
+docker run --rm -p 6379:6379 codecrafters-redis-python
+```
+
+The container starts the server with:
+
+```sh
+python -m app.main --host 0.0.0.0 --port 6379 --dir /data
+```
+
+Persist RDB files on the host:
+
+```sh
+docker run --rm -p 6379:6379 -v ${PWD}/tmp/files:/data codecrafters-redis-python
+```
+
+Run with custom arguments:
+
+```sh
+docker run --rm -p 6380:6380 codecrafters-redis-python --port 6380 --host 0.0.0.0
+```
+
+## Project Structure
+
+- `app/main.py` - server startup and CLI arguments
+- `app/handlers.py` - client request handling
+- `app/command_handlers/` - command implementations
+- `tests/` - automated test suite
+
+## CodeCrafters
+
+Containerization is only for local development and deployment convenience.
+CodeCrafters still uses its own runner configuration from `codecrafters.yml`
+and `.codecrafters/run.sh`.

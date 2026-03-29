@@ -1,0 +1,11 @@
+.git
+.gitignore
+.pytest_cache
+.coverage
+.venv
+.vscode
+__pycache__/
+*.pyc
+tests/
+tmp/
+.codecrafters/
