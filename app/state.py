@@ -23,7 +23,7 @@ class AppState:
         replicas_ports (list[int]): Ports of registered replica servers.
         replica_ack_offsets (dict[asyncio.StreamWriter, int]): Maps replicas to their acknowledgment offsets.
         pubsub (dict[bytes, set[asyncio.StreamWriter]]): Maps channel names to subscribed replica writers.
-    
+        bgsave_task (asyncio.Task | None): Task for the background save operation.
     """
     config: ServerConfig
     storage: CacheStorage
@@ -32,6 +32,9 @@ class AppState:
     replicas_ports: list[int] = field(default_factory=list)
     replica_ack_offsets: dict[asyncio.StreamWriter, int] = field(default_factory=dict)
     pubsub: dict[bytes, set[asyncio.StreamWriter]] = field(default_factory=lambda: defaultdict(set))
+    bgsave_task: asyncio.Future | None = None
+    
+    
     
     def register_replica(self, port: int | None, writer: asyncio.StreamWriter | None) -> None:
         if port is not None and port not in self.replicas_ports:

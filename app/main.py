@@ -4,6 +4,7 @@ import logging
 
 from app.config import ServerConfig
 from app.handlers import handle_client
+from app.persistence import load_from_disk
 from app.replication import replication_handshake_and_loop
 from app.state import AppState
 from app.storage import CacheStorage
@@ -51,9 +52,9 @@ async def main() -> None:
     config = ServerConfig(args.host, args.port, args.replicaof, args.dir, args.dbfilename)
     logger = logging.getLogger(__name__)
     storage = CacheStorage()
-    # Load persisted data from RDB file if it exists
-    storage.load(config.dir, config.dbfilename)
     app_state = AppState(config, storage, logger)
+    # Load persisted data from RDB file if it exists
+    load_from_disk(app_state)
 
     if config.replicaof:
         try:

@@ -3,6 +3,7 @@ import asyncio
 from app.command_executor import build_exec_ctx, encode_command_as_resp_array
 from app.dispatcher import dispatch_command
 from app.parser import RESPParser
+from app.persistence import load_rdb_snapshot
 from app.session import ClientSession
 from app.state import AppState
 
@@ -88,11 +89,7 @@ async def replication_handshake_and_loop(
             app_state.logger.error("Received invalid RDB payload from master")
             return
 
-        is_success = app_state.storage.load(
-            app_state.config.dir,
-            app_state.config.dbfilename,
-            rdb_payload,
-        )
+        is_success = load_rdb_snapshot(app_state, rdb_payload)
         if is_success:
             app_state.logger.info("Replication handshake completed successfully")
         else:

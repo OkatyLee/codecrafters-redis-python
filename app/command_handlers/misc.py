@@ -1,7 +1,7 @@
-import asyncio
 
 from app.commands import Arity, CommandContext, command
 from app.parser import RESPError
+from app.persistence import save_to_disk, schedule_bgsave
 from app.resp_types import ArrayType, BaseRESPType, BulkStringType, SimpleStringType
 
 
@@ -26,8 +26,7 @@ def cmd_config(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     flags={"readonly", "misc"}
 )
 def cmd_save(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
-    config = ctx.app_state.config
-    success = ctx.app_state.storage.save(config.dir, config.dbfilename)
+    success = save_to_disk(ctx.app_state)
     if not success:
         raise RESPError("ERR Error saving data")
     return SimpleStringType("OK")
@@ -39,11 +38,7 @@ def cmd_save(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     flags={"readonly", "coroutine", "misc"}
 )
 async def cmd_bgsave(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
-    config = ctx.app_state.config
-    async def start_bgsave():
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, ctx.app_state.storage.save, config.dir, config.dbfilename)
-    asyncio.create_task(start_bgsave())
+    schedule_bgsave(ctx.app_state)
     return SimpleStringType("Background saving started")
 
 

@@ -6,7 +6,7 @@ import pytest  # pyright: ignore[reportMissingImports]
 
 from app.config import ServerConfig
 from app.handlers import handle_client
-from app.main import replication_handshake_and_loop
+from app.replication import replication_handshake_and_loop
 from app.parser import RESPParser
 from app.state import AppState
 from app.storage import CacheStorage
