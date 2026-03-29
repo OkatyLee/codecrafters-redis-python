@@ -418,12 +418,3 @@ def _crc64(data: bytes) -> int:
             else:
                 crc >>= 1
     return crc
-
-
-_storage_instance: CacheStorage | None = None
-    
-def get_storage() -> CacheStorage:
-    global _storage_instance
-    if _storage_instance is None:
-        _storage_instance = CacheStorage()
-    return _storage_instance

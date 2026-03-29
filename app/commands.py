@@ -2,9 +2,9 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 from asyncio import StreamWriter
 
-from app.config import ServerConfig
-from app.parser import RESPParser, RESPValue
+from app.parser import RESPParser
 from app.session import ClientSession
+from app.state import AppState
 
 type PropagateCallback = Callable[[bytes], Awaitable[None]]
 type CommandHandler = Callable[["CommandContext", list[bytes]], Awaitable[object] | object]
@@ -13,12 +13,15 @@ COMMAND_WRITE_FLAGS: dict[bytes, bool] = {}
 
 COMMANDS: dict[bytes, "CommandSpec"] = {}
 
-class NullArray: pass
-class NullBulkString: pass
-
 
 @dataclass(slots=True)
 class Arity:
+    """
+    Specification for the arity of a Redis command. \
+    Attributes: \
+        min_args (int): The minimum number of arguments the command accepts. \
+        max_args (int | None): The maximum number of arguments the command accepts, or None if no limit.
+    """
     min_args: int
     max_args: int | None = None
     
@@ -32,6 +35,16 @@ class Arity:
 
 @dataclass(slots=True)
 class CommandSpec:
+    """
+    Specification for a Redis command.
+    Attributes:
+        name (bytes): The command name as bytes.
+        handler (CommandHandler): The function that handles execution of this command.
+        arity (Arity): The number of arguments the command accepts.
+        flags (set[str]): A set of flags describing command properties (e.g., 'write', 'readonly').
+        allowed_before_auth (bool): Whether the command can be executed before authentication. Defaults to False.
+        allowed_in_subscribe (bool): Whether the command can be executed in subscribe mode. Defaults to False.
+    """
     name: bytes
     handler: CommandHandler
     arity: Arity
@@ -48,6 +61,9 @@ def command(
     allowed_before_auth: bool = False,
     allowed_in_subscribe: bool = False,
 ):
+    """
+    Decorator to register a command handler.
+    """
     def decorator(func):
         command_name = name.upper()
         COMMANDS[command_name] = CommandSpec(
@@ -62,22 +78,17 @@ def command(
 
     return decorator
 
-
-def redis_command(name: bytes, *, is_write: bool = False):
-    """Register command metadata used by the dispatcher."""
-
-    command_name = name.upper()
-
-    def decorator(func):
-        COMMAND_WRITE_FLAGS[command_name] = is_write
-        return func
-
-    return decorator
-
-
 @dataclass(slots=True)
 class ExecCtx:
-    """Execution context for a single command dispatch."""
+    """
+    Execution context for a single command dispatch.
+    Fields:
+        from_replication (bool): Flag indicating whether the command is from replication.
+        raw_resp_command (bytes): The raw RESP command.
+        propagate (PropagateCallback): Callback for propagating changes.
+        replica_writer (StreamWriter | None): The writer for the replica connection.
+        session (ClientSession | None): The client session.
+    """
 
     from_replication: bool
     raw_resp_command: bytes
@@ -88,7 +99,17 @@ class ExecCtx:
 
 @dataclass(slots=True)
 class CommandContext:
+    """
+    Context for executing a command.                    
+    Attributes:                                             
+        parser (RESPParser): The RESP parser.           
+        app_state (AppState): The application state.    
+        session (ClientSession): The client session.    
+        exec_ctx (ExecCtx): The execution context.     
+    """
     parser: RESPParser
-    config: ServerConfig
+    app_state: AppState
     session: ClientSession
     exec_ctx: ExecCtx
+
+

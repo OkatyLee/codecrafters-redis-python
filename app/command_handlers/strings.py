@@ -1,12 +1,11 @@
-from app.commands import Arity, CommandContext, NullBulkString, command
-from app.parser import RESPError
-from app.storage import get_storage
+from app.commands import Arity, CommandContext, command
+from app.parser import RESPError, NullBulkString
 
 
 @command(
     name=b"SET",
     arity=Arity(2, None),
-    flags={"write"}
+    flags={"write", "strings"}
 )
 def cmd_set(ctx: CommandContext, args: list[bytes]) -> str:
     key, value, opt_args = args[0], args[1], args[2:]
@@ -29,8 +28,7 @@ def cmd_set(ctx: CommandContext, args: list[bytes]) -> str:
     if ex is not None:
         ex = int(ex)
     ttl = ex if ex is not None else px
-    storage = get_storage()
-    res = storage.set(key, value, ttl)
+    res = ctx.app_state.storage.set(key, value, ttl)
     if res: return "OK" 
     raise RESPError("Failed to set key")
 
@@ -38,27 +36,24 @@ def cmd_set(ctx: CommandContext, args: list[bytes]) -> str:
 @command(
     name=b"GET",
     arity=Arity(1, 1),
-    flags={"readonly"}
+    flags={"readonly", "strings"}
 )
 def cmd_get(ctx: CommandContext, args: list[bytes]) -> bytes | NullBulkString:
-    storage = get_storage()
     key = args[0]
-    value = storage.get(key)
+    value = ctx.app_state.storage.get(key)
     if value is None:
         return NullBulkString()
-    
     return value
 
 
 @command(
     name=b"DEL",
     arity=Arity(1, 1),
-    flags={"write"}
+    flags={"write", "strings"}
 )
 def cmd_del(ctx: CommandContext, args: list[bytes]) -> str:
     key = args[0]
-    storage = get_storage()
-    res = storage.delete(key)
+    res = ctx.app_state.storage.delete(key)
     if res:
         return "OK"
     
@@ -68,9 +63,8 @@ def cmd_del(ctx: CommandContext, args: list[bytes]) -> str:
 @command(
     name=b"INCR",
     arity=Arity(1, 1),
-    flags={"write"}
+    flags={"write", "strings"}
 )
 def cmd_incr(ctx: CommandContext, args: list[bytes]) -> int:
     key = args[0]
-    storage = get_storage()
-    return storage.incr(key)
+    return ctx.app_state.storage.incr(key)

@@ -1,8 +1,7 @@
 from hashlib import sha256
 
-from app.commands import Arity, CommandContext, NullArray, command
-from app.parser import RESPError
-from app.storage import get_storage
+from app.commands import Arity, CommandContext, command
+from app.parser import RESPError, NullArray
 
 
 @command(
@@ -25,8 +24,6 @@ def cmd_ping(ctx: CommandContext, args: list[bytes]) -> str | bytes | list[bytes
     name=b"ECHO",
     arity=Arity(1, 1),
     flags={"readonly", "fast"},
-    allowed_in_subscribe=True
-
 )
 def cmd_echo(ctx: CommandContext, args: list[bytes]) -> bytes:
     return args[0]
@@ -37,27 +34,24 @@ def cmd_echo(ctx: CommandContext, args: list[bytes]) -> bytes:
     arity=Arity(1, 2),
     flags={"connection", "fast"},
     allowed_before_auth=True,
-    allowed_in_subscribe=True,
 )
 def cmd_auth(ctx: CommandContext, args: list[bytes]) -> str:
-    config = ctx.config
-    session = ctx.session
-                
+    config = ctx.app_state.config
+    session = ctx.session         
     username, password = (args[0], args[1]) if len(args) == 2 else (b"default", args[0])
     user = config.get_acl_user(username.decode())
     if user is None or not user.check_password(password):
-        raise ValueError("WRONGPASS invalid username-password pair or user is disabled.")
+        raise RESPError("WRONGPASS invalid username-password pair or user is disabled.")
 
     ctx.session.login(user.name)
     return "OK"
 
 
 def _acl_setuser(ctx: CommandContext, username: bytes, password: bytes) -> str:
-        
         if not password.startswith(b'>'):
             raise RESPError("invalid password format for 'ACL SETUSER'")
 
-        user = ctx.config.ensure_acl_user(username.decode())
+        user = ctx.app_state.config.ensure_acl_user(username.decode())
         hashed_password = sha256(password[1:]).digest()
         user.passwords.add(hashed_password)
         user.nopass = False
@@ -65,7 +59,7 @@ def _acl_setuser(ctx: CommandContext, username: bytes, password: bytes) -> str:
 
 
 def _acl_getuser(ctx: CommandContext, username: bytes) -> list[bytes | list[bytes]] | NullArray:
-    user = ctx.config.get_acl_user(username.decode())
+    user = ctx.app_state.config.get_acl_user(username.decode())
     if user is None:
         return NullArray()
     

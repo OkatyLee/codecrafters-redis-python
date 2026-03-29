@@ -1,15 +1,18 @@
 import argparse
 import asyncio
+import logging
 import tempfile
 from unittest.mock import AsyncMock
 
+from app.command_executor import encode_command_as_resp_array
 import pytest  # pyright: ignore[reportMissingImports]
 
-import app.storage
 from app.config import ServerConfig
-from app.handlers import encode_command_as_resp_array, handle_client
+from app.handlers import handle_client
 from app.main import main, replication_handshake_and_loop
 from app.parser import RESPParser
+from app.state import AppState
+from app.storage import CacheStorage
 
 
 class _SocketStub:
@@ -29,14 +32,15 @@ class _ServerStub:
         return None
 
 
-@pytest.fixture(autouse=True)
-def reset_storage_singleton():
-    original_instance = app.storage._storage_instance
-    app.storage._storage_instance = None
-    try:
-        yield
-    finally:
-        app.storage._storage_instance = original_instance
+def make_app_state(
+    config: ServerConfig | None = None,
+    storage: CacheStorage | None = None,
+) -> AppState:
+    return AppState(
+        config or ServerConfig("127.0.0.1", 0),
+        storage or CacheStorage(),
+        logging.getLogger(__name__),
+    )
 
 
 async def send_command_and_read_response(
@@ -110,12 +114,13 @@ async def test_replication_handshake_propagates_master_write_to_slave():
     master_addr = master_server.sockets[0].getsockname()
 
     config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    app_state = make_app_state(config)
     master_reader, master_writer = await asyncio.open_connection(*master_addr)
 
-    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+    await replication_handshake_and_loop(master_reader, master_writer, app_state, 6380)
 
     assert handshake_seen.is_set()
-    assert app.storage.get_storage().get(b"foo") == b"bar"
+    assert app_state.storage.get(b"foo") == b"bar"
 
     master_server.close()
     await master_server.wait_closed()
@@ -169,19 +174,20 @@ async def test_slave_write_is_not_propagated_back_to_master():
     master_addr = master_server.sockets[0].getsockname()
 
     config = ServerConfig("127.0.0.1", 0, f"127.0.0.1:{master_addr[1]}")
+    app_state = make_app_state(config)
 
     async def handle_client_with_config(
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        await handle_client(reader, writer, config)
+        await handle_client(reader, writer, app_state)
 
     slave_server = await asyncio.start_server(handle_client_with_config, "127.0.0.1", 0)
     slave_addr = slave_server.sockets[0].getsockname()
 
     master_reader, master_writer = await asyncio.open_connection(*master_addr)
     replication_task = asyncio.create_task(
-        replication_handshake_and_loop(master_reader, master_writer, config, slave_addr[1])
+        replication_handshake_and_loop(master_reader, master_writer, app_state, slave_addr[1])
     )
 
     await asyncio.wait_for(handshake_seen.wait(), timeout=1)
@@ -251,7 +257,7 @@ def test_parse_args_short_port_flag(monkeypatch):
 async def test_main_loads_rdb_on_startup(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         # Pre-populate an RDB file
-        storage = app.storage.CacheStorage()
+        storage = CacheStorage()
         storage.set(b"preloaded", b"value")
         storage.save(tmpdir, "startup.rdb")
 
@@ -265,11 +271,11 @@ async def test_main_loads_rdb_on_startup(monkeypatch):
             ),
         )
         monkeypatch.setattr("app.main.asyncio.start_server", AsyncMock(return_value=server))
+        monkeypatch.setattr("app.main.CacheStorage", lambda: storage)
 
-        app.storage._storage_instance = None
         await main()
 
-        assert app.storage.get_storage().get(b"preloaded") == b"value"
+        assert storage.get(b"preloaded") == b"value"
 
 
 @pytest.mark.asyncio
@@ -286,12 +292,11 @@ async def test_main_missing_rdb_does_not_crash(monkeypatch):
         )
         monkeypatch.setattr("app.main.asyncio.start_server", AsyncMock(return_value=server))
 
-        app.storage._storage_instance = None
         await main()  # must not raise
 
 
 @pytest.mark.asyncio
-async def test_main_invalid_replicaof_format_returns_early(monkeypatch, capsys):
+async def test_main_invalid_replicaof_format_returns_early(monkeypatch, caplog):
     monkeypatch.setattr(
         "app.main.parse_args",
         lambda: argparse.Namespace(
@@ -302,8 +307,7 @@ async def test_main_invalid_replicaof_format_returns_early(monkeypatch, capsys):
 
     await main()
 
-    captured = capsys.readouterr()
-    assert "Error" in captured.out
+    assert "Error: --replicaof must be in the format host:port" in caplog.text
 
 
 # ---------- replication_handshake_and_loop error-path tests ----------
@@ -322,10 +326,11 @@ async def test_handshake_aborts_on_bad_ping_response():
     master_addr = master_server.sockets[0].getsockname()
 
     config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    app_state = make_app_state(config)
     master_reader, master_writer = await asyncio.open_connection(*master_addr)
 
     # Must return without raising
-    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+    await replication_handshake_and_loop(master_reader, master_writer, app_state, 6380)
 
     master_server.close()
     await master_server.wait_closed()
@@ -348,9 +353,10 @@ async def test_handshake_aborts_on_bad_replconf_listening_port_response():
     master_addr = master_server.sockets[0].getsockname()
 
     config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    app_state = make_app_state(config)
     master_reader, master_writer = await asyncio.open_connection(*master_addr)
 
-    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+    await replication_handshake_and_loop(master_reader, master_writer, app_state, 6380)
 
     master_server.close()
     await master_server.wait_closed()
@@ -376,9 +382,10 @@ async def test_handshake_aborts_on_bad_replconf_capa_response():
     master_addr = master_server.sockets[0].getsockname()
 
     config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    app_state = make_app_state(config)
     master_reader, master_writer = await asyncio.open_connection(*master_addr)
 
-    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+    await replication_handshake_and_loop(master_reader, master_writer, app_state, 6380)
 
     master_server.close()
     await master_server.wait_closed()
@@ -407,9 +414,10 @@ async def test_handshake_aborts_on_bad_psync_response():
     master_addr = master_server.sockets[0].getsockname()
 
     config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    app_state = make_app_state(config)
     master_reader, master_writer = await asyncio.open_connection(*master_addr)
 
-    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+    await replication_handshake_and_loop(master_reader, master_writer, app_state, 6380)
 
     master_server.close()
     await master_server.wait_closed()
@@ -440,9 +448,10 @@ async def test_handshake_aborts_on_non_bytes_rdb_payload():
     master_addr = master_server.sockets[0].getsockname()
 
     config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    app_state = make_app_state(config)
     master_reader, master_writer = await asyncio.open_connection(*master_addr)
 
-    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+    await replication_handshake_and_loop(master_reader, master_writer, app_state, 6380)
 
     master_server.close()
     await master_server.wait_closed()
@@ -460,10 +469,11 @@ async def test_handshake_handles_connection_error_gracefully(capsys):
     master_addr = master_server.sockets[0].getsockname()
 
     config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    app_state = make_app_state(config)
     master_reader, master_writer = await asyncio.open_connection(*master_addr)
 
     # Must return cleanly without raising, regardless of which code-path is taken
-    await replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+    await replication_handshake_and_loop(master_reader, master_writer, app_state, 6380)
 
     master_server.close()
     await master_server.wait_closed()
@@ -523,10 +533,11 @@ async def test_replica_replies_with_ack_on_getack():
     master_addr = master_server.sockets[0].getsockname()
 
     config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    app_state = make_app_state(config)
     master_reader, master_writer = await asyncio.open_connection(*master_addr)
 
     replication_task = asyncio.create_task(
-        replication_handshake_and_loop(master_reader, master_writer, config, 6380)
+        replication_handshake_and_loop(master_reader, master_writer, app_state, 6380)
     )
 
     await asyncio.wait_for(handshake_seen.wait(), timeout=1)

@@ -7,10 +7,21 @@ errors in the subset required by the exercises.
 
 import asyncio
 from collections.abc import Sequence
-from turtle import reset
+from dataclasses import dataclass
+
+
 
 type RESPPrimitive = bytes | str | int | None
 type RESPValue = RESPPrimitive | list["RESPValue"] | dict[bytes | str, "RESPValue"]
+
+
+class NullArray: pass
+class NullBulkString: pass
+
+
+@dataclass(slots=True)
+class RawResponse:
+    payload: bytes
 
 
 class RESPError(Exception):
@@ -141,6 +152,9 @@ class RESPParser:
             return b"*-1\r\n"
         result = b"*" + str(len(values)).encode() + b"\r\n"
         for value in values:
+            if isinstance(value, RawResponse):
+                result += value.payload
+                continue
             if isinstance(value, bytes):
                 result += self.encode_bulk_string(value)
             elif isinstance(value, str):
@@ -154,6 +168,10 @@ class RESPParser:
                 result += self.encode_array(val)
             elif value is None:
                 result += self.encode_null_array()
+            elif isinstance(value, NullArray):
+                result += self.encode_null_array()
+            elif isinstance(value, NullBulkString):
+                result += self.encode_null()
             else:
                 raise TypeError(f"Unsupported value type: {type(value)}")
         return result

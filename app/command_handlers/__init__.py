@@ -4,5 +4,7 @@ from app.command_handlers import (
     lists, 
     streams, 
     zsets,
-    misc
+    misc,
+    pubsub,
+    transactions
 )

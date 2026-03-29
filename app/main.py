@@ -1,11 +1,15 @@
 import argparse
 import asyncio
+import logging
 
+from app.command_executor import encode_command_as_resp_array
 from app.config import ServerConfig
-from app.handlers import _execute_command, build_exec_ctx, encode_command_as_resp_array, handle_client
+from app.dispatcher import dispatch_command
+from app.handlers import build_exec_ctx, handle_client
 from app.parser import RESPParser
 from app.session import ClientSession
-from app.storage import get_storage
+from app.state import AppState
+from app.storage import CacheStorage
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,35 +52,37 @@ async def main() -> None:
     """Start server and, if needed, establish replica handshake."""
     args = parse_args()
     config = ServerConfig(args.host, args.port, args.replicaof, args.dir, args.dbfilename)
-
+    logger = logging.getLogger(__name__)
+    storage = CacheStorage()
     # Load persisted data from RDB file if it exists
-    get_storage().load(config.dir, config.dbfilename)
+    storage.load(config.dir, config.dbfilename)
+    app_state = AppState(config, storage, logger)
 
     if config.replicaof:
         try:
             host, port_str = config.replicaof.split(":", 1)
             master_port = int(port_str)
         except (ValueError, IndexError):
-            print("Error: --replicaof must be in the format host:port")
+            app_state.logger.error("Error: --replicaof must be in the format host:port")
             return
 
-        print(f"Connect to master {host}:{master_port}")
+        app_state.logger.info(f"Connecting to master {host}:{master_port}")
         master_reader, master_writer = await asyncio.open_connection(host, master_port)
         asyncio.create_task(
             replication_handshake_and_loop(
                 master_reader,
                 master_writer,
-                config,
+                app_state,
                 args.port,
             )
         )
 
     async def handle_client_wrapper(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await handle_client(reader, writer, config)
+        await handle_client(reader, writer, app_state)
 
     server = await asyncio.start_server(handle_client_wrapper, args.host, args.port)
     addr = server.sockets[0].getsockname()
-    print(f"Server started on {addr}")
+    app_state.logger.info(f"Server started on {addr}")
 
     async with server:
         await server.serve_forever()
@@ -85,20 +91,20 @@ async def main() -> None:
 async def replication_handshake_and_loop(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
-    config: ServerConfig,
+    app_state: AppState,
     my_listening_port: int,
 ) -> None:
     """Perform replica handshake and apply write commands from master."""
     parser = RESPParser(reader)
-    replication_session = ClientSession.create(config.get_acl_user("default"))
+    replication_session = ClientSession.create(app_state.config.get_acl_user("default"))
     try:
-        print("Starting replication handshake")
+        app_state.logger.info("Starting replication handshake")
 
         writer.write(parser.encode_array([b"PING"]))
         await writer.drain()
         response = await parser.parse()
         if response != "PONG":
-            print("Received unexpected response to PING from master")
+            app_state.logger.error("Received unexpected response to PING from master")
             return
 
         writer.write(
@@ -109,29 +115,29 @@ async def replication_handshake_and_loop(
         await writer.drain()
         response = await parser.parse()
         if response != "OK":
-            print("Received unexpected response to REPLCONF listening-port")
+            app_state.logger.error("Received unexpected response to REPLCONF listening-port")
             return
 
         writer.write(parser.encode_array([b"REPLCONF", b"capa", b"psync2"]))
         await writer.drain()
         response = await parser.parse()
         if response != "OK":
-            print("Received unexpected response to REPLCONF capa")
+            app_state.logger.error("Received unexpected response to REPLCONF capa")
             return
 
         writer.write(parser.encode_array([b"PSYNC", b"?", b"-1"]))
         await writer.drain()
         response = await parser.parse()
         if not isinstance(response, str) or not response.startswith("FULLRESYNC "):
-            print("Received unexpected response to PSYNC")
+            app_state.logger.error("Received unexpected response to PSYNC")
             return
 
         rdb_payload = await parser.parse()
         if not isinstance(rdb_payload, bytes):
-            print("Received invalid RDB payload from master")
+            app_state.logger.error("Received invalid RDB payload from master")
             return
-        is_success = get_storage().load(config.dir, config.dbfilename, rdb_payload)
-        print("Replication handshake completed successfully" if is_success else "Unexpected error during handshake")
+        is_success = app_state.storage.load(app_state.config.dir, app_state.config.dbfilename, rdb_payload)
+        app_state.logger.info("Replication handshake completed successfully" if is_success else "Unexpected error during handshake")
         while True:
             data = await parser.parse()
             if data is None:
@@ -140,25 +146,26 @@ async def replication_handshake_and_loop(
                 continue
             command = [item if isinstance(item, bytes) else str(item).encode() for item in data]
             command[0] = command[0].upper()
-            config.increment_replica_repl_offset(len(encode_command_as_resp_array(command)))
+            app_state.config.increment_replica_repl_offset(len(encode_command_as_resp_array(command)))
             ctx = build_exec_ctx(
                 command,
-                config,
+                app_state,
                 from_replication=True,
                 session=replication_session,
             )
-            response = await _execute_command(command, parser, config, ctx)
+            response = await dispatch_command(command, parser, app_state, replication_session, ctx)
             if command[:2] == [b"REPLCONF", b"GETACK"] and response:
                 writer.write(response)
                 await writer.drain()
     except Exception as e:
-        print(f"Replication error: {e}")
+        app_state.logger.error(f"Replication error: {e}")
     finally:
         writer.close()
         try:
             await writer.wait_closed()
         except (ConnectionResetError, BrokenPipeError, OSError):
             # Peer may drop/reset TCP connection during shutdown (common on Windows).
+            app_state.logger.error("Error occurred while waiting for writer to close")
             pass
 
 

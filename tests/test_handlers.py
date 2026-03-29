@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import tempfile
 from typing import cast
@@ -8,18 +9,35 @@ import pytest    # pyright: ignore[reportMissingImports]
 from app.config import ServerConfig
 from app.handlers import handle_client
 from app.parser import RESPParser
+from app.state import AppState
+from app.storage import CacheStorage
 
 
-@pytest.fixture(autouse=True)
-def reset_storage_singleton():
-    import app.storage
+def make_app_state(
+    config: ServerConfig | None = None,
+    storage: CacheStorage | None = None,
+) -> AppState:
+    return AppState(
+        config or ServerConfig("127.0.0.1", 0),
+        storage or CacheStorage(),
+        logging.getLogger(__name__),
+    )
 
-    original_instance = app.storage._storage_instance
-    app.storage._storage_instance = None
-    try:
-        yield
-    finally:
-        app.storage._storage_instance = original_instance
+
+async def start_test_server(
+    config: ServerConfig | None = None,
+    app_state: AppState | None = None,
+) -> tuple[asyncio.base_events.Server, AppState]:
+    state = app_state or make_app_state(config)
+
+    async def _handle(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        await handle_client(reader, writer, state)
+
+    server = await asyncio.start_server(_handle, state.config.host, 0)
+    return server, state
 
 
 async def send_command_and_read_response(
@@ -82,7 +100,7 @@ async def read_fullresync_and_rdb(reader: asyncio.StreamReader) -> tuple[bytes, 
 
 @pytest.mark.asyncio
 async def test_handle_client_ping():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -98,7 +116,7 @@ async def test_handle_client_ping():
 
 @pytest.mark.asyncio
 async def test_handle_client_echo():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -114,7 +132,7 @@ async def test_handle_client_echo():
 
 @pytest.mark.asyncio
 async def test_handle_client_set_and_get():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -140,7 +158,7 @@ async def test_handle_client_set_and_get():
 
 @pytest.mark.asyncio
 async def test_handle_client_get_missing_returns_null_bulk_string():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -160,7 +178,7 @@ async def test_handle_client_get_missing_returns_null_bulk_string():
 
 @pytest.mark.asyncio
 async def test_handle_client_unknown_command():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -176,7 +194,7 @@ async def test_handle_client_unknown_command():
 
 @pytest.mark.asyncio
 async def test_handle_client_set_with_px_expires():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -203,7 +221,7 @@ async def test_handle_client_set_with_px_expires():
 
 @pytest.mark.asyncio
 async def test_handle_client_set_with_lowercase_px_expires():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -231,7 +249,7 @@ async def test_handle_client_set_with_lowercase_px_expires():
 @pytest.mark.asyncio
 async def test_blpop_immediate_when_list_has_elements():
     """BLPOP returns immediately if the list already has data."""
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -259,7 +277,7 @@ async def test_blpop_immediate_when_list_has_elements():
 @pytest.mark.asyncio
 async def test_blpop_timeout_returns_nil():
     """BLPOP with short timeout on empty list returns *-1."""
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -279,7 +297,7 @@ async def test_blpop_timeout_returns_nil():
 @pytest.mark.asyncio
 async def test_blpop_blocks_until_push():
     """BLPOP blocks and unblocks when another client pushes."""
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader1, writer1 = await asyncio.open_connection(*addr)
@@ -313,7 +331,7 @@ async def test_blpop_blocks_until_push():
 
 @pytest.mark.asyncio
 async def test_list_commands_rpush_llen_lrange():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -346,7 +364,7 @@ async def test_list_commands_rpush_llen_lrange():
 
 @pytest.mark.asyncio
 async def test_lrange_wrongtype_returns_error_for_string_and_sorted_set_keys():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -385,7 +403,7 @@ async def test_lrange_wrongtype_returns_error_for_string_and_sorted_set_keys():
 
 @pytest.mark.asyncio
 async def test_lpop_single_and_count_modes():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -424,7 +442,7 @@ async def test_lpop_single_and_count_modes():
 
 @pytest.mark.asyncio
 async def test_type_for_string_list_and_stream():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -479,7 +497,7 @@ async def test_type_for_string_list_and_stream():
 
 @pytest.mark.asyncio
 async def test_xadd_handler_explicit_and_bytes_id():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -506,7 +524,7 @@ async def test_xadd_handler_explicit_and_bytes_id():
 
 @pytest.mark.asyncio
 async def test_blpop_wrong_number_of_arguments_returns_error():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -526,7 +544,7 @@ async def test_blpop_wrong_number_of_arguments_returns_error():
 
 @pytest.mark.asyncio
 async def test_set_with_ex_and_px_returns_error_and_connection_stays_open():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -552,7 +570,7 @@ async def test_set_with_ex_and_px_returns_error_and_connection_stays_open():
 
 @pytest.mark.asyncio
 async def test_xadd_rejects_zero_id_with_error_reply():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -572,7 +590,7 @@ async def test_xadd_rejects_zero_id_with_error_reply():
 
 @pytest.mark.asyncio
 async def test_xadd_rejects_wrong_payload_arity_with_error_reply():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -592,7 +610,7 @@ async def test_xadd_rejects_wrong_payload_arity_with_error_reply():
 
 @pytest.mark.asyncio
 async def test_xadd_rejects_non_stream_key_type_with_error_reply():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -617,7 +635,7 @@ async def test_xadd_rejects_non_stream_key_type_with_error_reply():
 
 @pytest.mark.asyncio
 async def test_xread_streams_returns_new_entries_after_id():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -643,7 +661,7 @@ async def test_xread_streams_returns_new_entries_after_id():
 
 @pytest.mark.asyncio
 async def test_xread_block_streams_unblocks_on_new_entry():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader1, writer1 = await asyncio.open_connection(*addr)
@@ -694,7 +712,7 @@ async def test_xread_block_streams_unblocks_on_new_entry():
 
 @pytest.mark.asyncio
 async def test_xread_streams_with_dollar_returns_null_without_new_entries():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -720,7 +738,7 @@ async def test_xread_streams_with_dollar_returns_null_without_new_entries():
 
 @pytest.mark.asyncio
 async def test_xread_block_zero_streams_waits_until_new_entry():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader1, writer1 = await asyncio.open_connection(*addr)
@@ -772,7 +790,7 @@ async def test_xread_block_zero_streams_waits_until_new_entry():
 
 @pytest.mark.asyncio
 async def test_xread_rejects_missing_streams_keyword_with_error_reply():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -792,7 +810,7 @@ async def test_xread_rejects_missing_streams_keyword_with_error_reply():
 
 @pytest.mark.asyncio
 async def test_xread_rejects_unbalanced_streams_and_ids_with_error_reply():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -812,7 +830,7 @@ async def test_xread_rejects_unbalanced_streams_and_ids_with_error_reply():
 
 @pytest.mark.asyncio
 async def test_xread_rejects_non_stream_key_type_with_error_reply():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -837,7 +855,7 @@ async def test_xread_rejects_non_stream_key_type_with_error_reply():
 
 @pytest.mark.asyncio
 async def test_xrange_wrongtype_returns_error_for_string_and_sorted_set_keys():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -876,7 +894,7 @@ async def test_xrange_wrongtype_returns_error_for_string_and_sorted_set_keys():
     
 @pytest.mark.asyncio
 async def test_incr_command_with_correct_key():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -901,7 +919,7 @@ async def test_incr_command_with_correct_key():
     
 @pytest.mark.asyncio
 async def test_incr_command_with_unexising_key():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -919,7 +937,7 @@ async def test_incr_command_with_unexising_key():
     
 @pytest.mark.asyncio
 async def test_incr_command_with_non_integer_value():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -933,7 +951,6 @@ async def test_incr_command_with_non_integer_value():
         writer,
         b"*2\r\n$4\r\nINCR\r\n$3\r\nkey\r\n",
     )
-    print(response)
     assert response == b"-ERR Value at key is not an integer\r\n"
     writer.close()
     await writer.wait_closed()
@@ -943,7 +960,7 @@ async def test_incr_command_with_non_integer_value():
 
 @pytest.mark.asyncio
 async def test_multi_exec_queues_and_executes_commands_in_order():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -987,7 +1004,7 @@ async def test_multi_exec_queues_and_executes_commands_in_order():
 
 @pytest.mark.asyncio
 async def test_discard_clears_transaction_queue_without_applying_changes():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -1025,7 +1042,7 @@ async def test_discard_clears_transaction_queue_without_applying_changes():
 
 @pytest.mark.asyncio
 async def test_exec_without_multi_returns_error():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -1045,7 +1062,7 @@ async def test_exec_without_multi_returns_error():
 
 @pytest.mark.asyncio
 async def test_discard_without_multi_returns_error():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -1067,13 +1084,7 @@ async def test_discard_without_multi_returns_error():
 async def test_master_propagates_set_to_multiple_replicas():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handle_client_with_config(
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handle_client_with_config, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
 
     replica1_reader, replica1_writer = await asyncio.open_connection(*addr)
@@ -1150,7 +1161,7 @@ async def test_master_propagates_other_write_commands_to_replica(
     expected_response,
     expected_replica_command,
 ):
-    from app.handlers import encode_command_as_resp_array
+    from app.command_executor import encode_command_as_resp_array
 
     config = ServerConfig("127.0.0.1", 0)
     server = await asyncio.start_server(_make_server_with_config(config), "127.0.0.1", 0)
@@ -1193,10 +1204,10 @@ async def test_master_propagates_other_write_commands_to_replica(
 
 def _make_server_with_config(config: ServerConfig):
     """Helper: start a server and return (server, addr)."""
-    import asyncio
+    app_state = make_app_state(config)
 
     async def _handle(reader, writer):
-        await handle_client(reader, writer, config)
+        await handle_client(reader, writer, app_state)
 
     return _handle
 
@@ -1334,11 +1345,12 @@ async def test_wait_replica_acks_in_time_returns_one():
 
     async def replica_respond_to_getack():
         """Read GETACK from master, reply with ACK carrying correct offset."""
+        from app.command_executor import encode_command_as_resp_array
         resp_parser = RESPParser(replica_reader)
         msg = await asyncio.wait_for(resp_parser.parse(), timeout=1)
         assert msg == [b"REPLCONF", b"GETACK", b"*"]
         # Replica ACKs with the number of bytes it received (SET cmd + GETACK cmd)
-        from app.handlers import encode_command_as_resp_array
+        
         set_len = len(encode_command_as_resp_array([b"SET", b"fn", b"bar"]))
         getack_len = len(encode_command_as_resp_array([b"REPLCONF", b"GETACK", b"*"]))
         ack_offset = set_len + getack_len
@@ -1423,9 +1435,9 @@ async def test_wait_two_replicas_only_one_acks():
     await replica1_reader.readexactly(len(propagated))
     await replica2_reader.readexactly(len(propagated))
 
-    from app.handlers import encode_command_as_resp_array
 
     async def replica1_acks():
+        from app.command_executor import encode_command_as_resp_array
         parser = RESPParser(replica1_reader)
         msg = await asyncio.wait_for(parser.parse(), timeout=1)
         assert msg == [b"REPLCONF", b"GETACK", b"*"]
@@ -1471,10 +1483,7 @@ async def test_handle_save_command_returns_ok():
     with tempfile.TemporaryDirectory() as tmpdir:
         config = ServerConfig("127.0.0.1", 6379, dir=tmpdir, dbfilename="test.rdb")
 
-        async def handler(reader, writer):
-            await handle_client(reader, writer, config)
-
-        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        server, app_state = await start_test_server(config)
         addr = server.sockets[0].getsockname()
 
         reader, writer = await asyncio.open_connection(*addr)
@@ -1491,13 +1500,15 @@ async def test_handle_save_command_returns_ok():
 
 @pytest.mark.asyncio
 async def test_handle_save_persists_and_load_restores():
-    import app.storage
-
     with tempfile.TemporaryDirectory() as tmpdir:
-        config = ServerConfig("127.0.0.1", 6379, dir=tmpdir, dbfilename="test.rdb")
+        app_state = AppState(
+            ServerConfig("127.0.0.1", 6379, dir=tmpdir, dbfilename="test.rdb"),
+            CacheStorage(),
+            logging.getLogger(__name__)
+        )
 
         async def handler(reader, writer):
-            await handle_client(reader, writer, config)
+            await handle_client(reader, writer, app_state)
 
         server = await asyncio.start_server(handler, "127.0.0.1", 0)
         addr = server.sockets[0].getsockname()
@@ -1511,15 +1522,9 @@ async def test_handle_save_persists_and_load_restores():
         server.close()
         await server.wait_closed()
 
-        # Reset singleton and load from the saved RDB
-        original = app.storage._storage_instance
-        app.storage._storage_instance = None
-        try:
-            storage = app.storage.get_storage()
-            storage.load(tmpdir, "test.rdb")
-            assert storage.get(b"hello") == b"world"
-        finally:
-            app.storage._storage_instance = original
+        restored_storage = CacheStorage()
+        restored_storage.load(tmpdir, "test.rdb")
+        assert restored_storage.get(b"hello") == b"world"
 
 
 @pytest.mark.asyncio
@@ -1527,10 +1532,7 @@ async def test_handle_bgsave_command_returns_background_saving_started():
     with tempfile.TemporaryDirectory() as tmpdir:
         config = ServerConfig("127.0.0.1", 6379, dir=tmpdir, dbfilename="bg.rdb")
 
-        async def handler(reader, writer):
-            await handle_client(reader, writer, config)
-
-        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        server, app_state = await start_test_server(config)
         addr = server.sockets[0].getsockname()
 
         reader, writer = await asyncio.open_connection(*addr)
@@ -1550,7 +1552,7 @@ async def test_handle_bgsave_command_returns_background_saving_started():
 
 @pytest.mark.asyncio
 async def test_handle_keys_star_returns_all_keys():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -1570,7 +1572,7 @@ async def test_handle_keys_star_returns_all_keys():
 
 @pytest.mark.asyncio
 async def test_handle_keys_pattern_filters():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -1591,7 +1593,7 @@ async def test_handle_keys_pattern_filters():
 
 @pytest.mark.asyncio
 async def test_handle_keys_no_match_returns_empty_array():
-    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -1609,10 +1611,7 @@ async def test_handle_keys_no_match_returns_empty_array():
 async def test_default_user_is_auto_authenticated_with_nopass():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -1640,10 +1639,7 @@ async def test_default_user_is_auto_authenticated_with_nopass():
 async def test_setting_default_password_requires_auth_for_new_connections_only():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
 
     authed_reader, authed_writer = await asyncio.open_connection(*addr)
@@ -1705,10 +1701,7 @@ async def test_setting_default_password_requires_auth_for_new_connections_only()
 async def test_acl_setuser_creates_user_and_auth_switches_session_user():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
 
     admin_reader, admin_writer = await asyncio.open_connection(*addr)
@@ -1746,10 +1739,7 @@ async def test_acl_setuser_creates_user_and_auth_switches_session_user():
 async def test_subscribe_returns_confirmation_array():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -1771,10 +1761,7 @@ async def test_subscribe_returns_confirmation_array():
 async def test_publish_delivers_message_to_subscriber_and_returns_count():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
 
     sub_reader, sub_writer = await asyncio.open_connection(*addr)
@@ -1808,10 +1795,7 @@ async def test_publish_delivers_message_to_subscriber_and_returns_count():
 async def test_ping_allowed_in_subscribe_mode():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -1839,10 +1823,7 @@ async def test_ping_allowed_in_subscribe_mode():
 async def test_regular_command_blocked_in_subscribe_mode():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -1870,10 +1851,7 @@ async def test_regular_command_blocked_in_subscribe_mode():
 async def test_unsubscribe_exits_subscribe_mode_and_restores_normal_ping():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
 
     reader, writer = await asyncio.open_connection(*addr)
@@ -1941,10 +1919,7 @@ async def create_sorted_set(reader: asyncio.StreamReader, writer: asyncio.Stream
 async def test_sorted_set_command_zadd_zrank():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
     res1, res2, res3, res4, res5, res6 = await create_sorted_set(reader, writer)
@@ -1981,10 +1956,7 @@ async def test_sorted_set_command_zadd_zrank():
 async def test_sorted_set_command_zadd_zrange():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
     results = await create_sorted_set(reader, writer)
@@ -2041,10 +2013,7 @@ async def test_sorted_set_command_zadd_zrange():
 async def test_sorted_set_command_zcard():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
     empty_zcard_result = await send_command_and_read_response(
@@ -2071,10 +2040,7 @@ async def test_sorted_set_command_zcard():
 async def test_sorted_set_command_zscore():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
     results = await create_sorted_set(reader, writer)
@@ -2101,10 +2067,7 @@ async def test_sorted_set_command_zscore():
 async def test_sorted_set_command_zrem():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
     results = await create_sorted_set(reader, writer)
@@ -2148,10 +2111,7 @@ async def test_sorted_set_command_zrem():
 async def test_geospatial_command_geoadd_geopos():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
     geoadd_result = await send_command_and_read_response(
@@ -2182,10 +2142,7 @@ async def test_geospatial_command_geoadd_geopos():
 async def test_geospatial_command_zadd_geopos():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
     zadd_result = await send_command_and_read_response(
@@ -2216,10 +2173,7 @@ async def test_geospatial_command_zadd_geopos():
 async def test_geospatial_command_geopos_multiple_members_and_missing_member():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
 
@@ -2263,10 +2217,7 @@ async def test_geospatial_command_geopos_multiple_members_and_missing_member():
 async def test_geospatial_command_geopos_missing_key_returns_nulls():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
 
@@ -2288,10 +2239,7 @@ async def test_geospatial_command_geopos_missing_key_returns_nulls():
 async def test_geospatial_command_geoadd_invalid_coordinates_returns_error():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
 
@@ -2313,10 +2261,7 @@ async def test_geospatial_command_geoadd_invalid_coordinates_returns_error():
 async def test_geospatial_command_geopos_wrongtype_returns_error_for_string_key():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
 
@@ -2345,10 +2290,7 @@ async def test_geospatial_command_geopos_wrongtype_returns_error_for_string_key(
 async def test_geospatial_command_geodist():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
 
@@ -2382,10 +2324,7 @@ async def test_geospatial_command_geodist():
 async def test_geospatial_command_geodist_missing_member_returns_null():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
 
@@ -2413,10 +2352,7 @@ async def test_geospatial_command_geodist_missing_member_returns_null():
 async def test_geospatial_command_geosearch_fromlonlat_byradius():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
 
@@ -2454,10 +2390,7 @@ async def test_geospatial_command_geosearch_fromlonlat_byradius():
 async def test_geospatial_command_geosearch_missing_key_returns_empty_array():
     config = ServerConfig("127.0.0.1", 0)
 
-    async def handler(reader, writer):
-        await handle_client(reader, writer, config)
-
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
+    server, app_state = await start_test_server(config)
     addr = server.sockets[0].getsockname()
     reader, writer = await asyncio.open_connection(*addr)
 
@@ -2474,3 +2407,6 @@ async def test_geospatial_command_geosearch_missing_key_returns_empty_array():
     server.close()
     await server.wait_closed()
     
+
+
+

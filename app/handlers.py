@@ -1,58 +1,69 @@
 import asyncio
 from collections.abc import Sequence
-from hashlib import sha256
-import os
+from app.command_executor import build_exec_ctx
 from app.session import ClientSession
-from app.commands import COMMANDS, COMMAND_WRITE_FLAGS, CommandSpec, ExecCtx, redis_command
-from app.config import ServerConfig
+from app.commands import COMMANDS, ExecCtx
 from app.dispatcher import dispatch_command
-from app.parser import RESPError, RESPParser
-from app.storage import get_storage
+from app.parser import RESPParser
+from app.state import AppState
 
 
 
-def encode_command_as_resp_array(command: Sequence[bytes]) -> bytes:
-    payload = b"*" + str(len(command)).encode() + b"\r\n"
-    for item in command:
-        payload += b"$" + str(len(item)).encode() + b"\r\n" + item + b"\r\n"
-    return payload
+# def encode_command_as_resp_array(command: Sequence[bytes]) -> bytes:
+#     payload = b"*" + str(len(command)).encode() + b"\r\n"
+#     for item in command:
+#         payload += b"$" + str(len(item)).encode() + b"\r\n" + item + b"\r\n"
+#     return payload
 
 
-def build_exec_ctx(
-    command: Sequence[bytes],
-    config: ServerConfig | None,
-    *,
-    from_replication: bool,
-    replica_writer: asyncio.StreamWriter | None = None,
-    session: ClientSession | None = None
-) -> ExecCtx:
-    return ExecCtx(
-        from_replication=from_replication,
-        raw_resp_command=encode_command_as_resp_array(command),
-        propagate=lambda payload, cfg=config: propagate_to_replicas(cfg, payload),
-        replica_writer=replica_writer,
-        session=session,
-    )
+# def build_exec_ctx(
+#     command: Sequence[bytes],
+#     app_state: AppState,
+#     *,
+#     from_replication: bool,
+#     replica_writer: asyncio.StreamWriter | None = None,
+#     session: ClientSession | None = None
+# ) -> ExecCtx:
+#     return ExecCtx(
+#         from_replication=from_replication,
+#         raw_resp_command=encode_command_as_resp_array(command),
+#         propagate=lambda payload, state=app_state: propagate_to_replicas(state, payload),
+#         replica_writer=replica_writer,
+#         session=session,
+#     )
 
 
-async def propagate_to_replicas(config: ServerConfig | None, payload: bytes) -> None:
-    if config is None or config.role != "master" or not config.replica_writers:
-        return
+# async def propagate_to_replicas(app_state: AppState | None, payload: bytes) -> None:
+#     if app_state is None or app_state.config.role != "master" or not app_state.replica_writers:
+#         return
 
-    config.increment_master_repl_offset(len(payload))
+#     app_state.config.increment_master_repl_offset(len(payload))
 
-    stale_writers: list[asyncio.StreamWriter] = []
-    for replica_writer in list(config.replica_writers):
-        try:
-            replica_writer.write(payload)
-            await replica_writer.drain()
-        except Exception:
-            stale_writers.append(replica_writer)
+#     stale_writers: list[asyncio.StreamWriter] = []
+    
+#     async def _write_drain(replica_writer: asyncio.StreamWriter, payload: bytes):
+#         try:
+#             replica_writer.write(payload)
+#             await replica_writer.drain()
+#         except Exception:
+#             stale_writers.append(replica_writer)
+            
+#     async with asyncio.TaskGroup() as tg:
+#         for replica_writer in list(app_state.replica_writers):
+#             tg.create_task(_write_drain(replica_writer, payload))
 
-    for stale_writer in stale_writers:
-        config.unregister_replica(stale_writer)
-        stale_writer.close()
-        await stale_writer.wait_closed()
+
+#     async def _unregister_stale_replica(stale_writer: asyncio.StreamWriter):
+#         app_state.unregister_replica(stale_writer)
+#         stale_writer.close()
+#         try:
+#             await stale_writer.wait_closed()
+#         except Exception:
+#             pass
+
+#     async with asyncio.TaskGroup() as tg:
+#         for stale_writer in stale_writers:
+#             tg.create_task(_unregister_stale_replica(stale_writer))
 
 
 
@@ -73,29 +84,26 @@ def _encode_raw_resp_array(responses: Sequence[bytes]) -> bytes:
 async def _execute_command(
     command: list[bytes],
     parser: RESPParser,
-    config: ServerConfig | None,
+    app_state: AppState,
     ctx: ExecCtx | None = None,
 ) -> bytes:
-    if ctx is None:
-        ctx = build_exec_ctx(command, config, from_replication=False)
+    assert ctx is not None
 
-    if config is not None and ctx.session is not None and command[0].upper() in COMMANDS:
-        return await dispatch_command(command, parser, config, ctx.session, ctx)
+    if app_state is not None and ctx.session is not None and command[0].upper() in COMMANDS:
+        return await dispatch_command(command, parser, app_state, ctx.session, ctx)
     else:
         return parser.encode_simple_error("unknown command")
 
 async def handle_client(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
-    config: ServerConfig | None = None,
+    app_state: AppState,
 ) -> None:
-    if config is None:
-        config = ServerConfig("127.0.0.1", 0)
-
+    
     addr = writer.get_extra_info("peername")
-    print(f"Connected to client at {addr}")
+    app_state.logger.info(f"Connected to client at {addr}")
     parser = RESPParser(reader)
-    default_user = config.get_acl_user("default")
+    default_user = app_state.config.get_acl_user("default")
     session = ClientSession.create(default_user)
     try:
         while True:
@@ -109,100 +117,25 @@ async def handle_client(
                 continue
 
             command = _normalize_command(data)
-            
-            match command:
-                case [b"MULTI"]:
-                    if session.in_multi:
-                        response = parser.encode_simple_error("MULTI calls can not be nested")
-                    else:
-                        session.in_multi = True
-                        session.queued_commands.clear()
-                        response = parser.encode_simple_string("OK")
-                case [b"EXEC"]:
-                    if not session.in_multi:
-                        response = parser.encode_simple_error("EXEC without MULTI")
-                    else:
-                        commands_to_execute = session.queued_commands.copy()
-                        session.queued_commands.clear()
-                        session.in_multi = False
-                        responses: list[bytes] = []
-                        for queued in commands_to_execute:
-                            queued_ctx = build_exec_ctx(
-                                queued,
-                                config,
-                                from_replication=False,
-                                replica_writer=writer,
-                                session=session
-                            )
-                            responses.append(
-                                await _execute_command(queued, parser, config, queued_ctx)
-                            )
-                        response = _encode_raw_resp_array(responses)
-                case [b"DISCARD"]:
-                    if not session.in_multi:
-                        response = parser.encode_simple_error("DISCARD without MULTI")
-                    else:
-                        session.queued_commands.clear()
-                        session.in_multi = False
-                        response = parser.encode_simple_string("OK")
-                case [b"SUBSCRIBE", *channels]:
-                    assert config is not None
-                    if not channels:
-                        response = parser.encode_simple_error("wrong number of arguments for 'subscribe' command")
-                    else:
-                        combined = b""
-                        for channel in channels:
-                            ch = channel if isinstance(channel, bytes) else str(channel).encode()
-                            config.pubsub[ch].add(writer)
-                            session.subscribed_channels.add(ch)
-                            combined += parser.encode_array([b"subscribe", ch, len(session.subscribed_channels)])
-                        session.in_subscribed_mode = True
-                        response = combined
-                case [b"UNSUBSCRIBE", *channels]:
-                    assert config is not None
-                    targets = (
-                        [c if isinstance(c, bytes) else str(c).encode() for c in channels]
-                        if channels else list(session.subscribed_channels)
-                    )
-                    combined = b""
-                    for ch in targets:
-                        session.subscribed_channels.discard(ch)
-                        config.pubsub[ch].discard(writer)
-                        combined += parser.encode_array([b"unsubscribe", ch, len(session.subscribed_channels)])
-                    if not session.subscribed_channels:
-                        session.in_subscribed_mode = False
-                    response = combined if combined else parser.encode_array([b"unsubscribe", None, 0])
-                case _:
-                    if session.in_subscribed_mode:
-                        if command[0] == b"PING":
-                            msg = command[1] if len(command) > 1 else b""
-                            response = parser.encode_array([b"pong", msg])
-                        else:
-                            response = parser.encode_simple_error(
-                                "ERR Command not allowed in subscribe mode"
-                            )
-                    elif session.in_multi:  
-                        session.queued_commands.append(command)
-                        response = parser.encode_simple_string("QUEUED")
-                    else:
-                        ctx = build_exec_ctx(
-                            command,
-                            config,
-                            from_replication=False,
-                            replica_writer=writer,
-                            session=session
-                        )
-                        response = await _execute_command(command, parser, config, ctx)
+        
+            ctx = build_exec_ctx(
+                command,
+                app_state,
+                from_replication=False,
+                replica_writer=writer,
+                session=session
+            )
+            response = await dispatch_command(command, parser, app_state, session, ctx)
 
             writer.write(response)
             await writer.drain()
     except Exception as e:
-        print(f"Error handling client: {e}")
+        app_state.logger.error(f"Error handling client: {e}")
     finally:
-        if config is not None:
-            if writer in config.replica_writers:
-                config.replica_writers.remove(writer)
+        if app_state.config is not None:
+            if writer in app_state.replica_writers:
+                app_state.replica_writers.remove(writer)
             for ch in session.subscribed_channels:
-                config.pubsub[ch].discard(writer)
+                app_state.pubsub[ch].discard(writer)
         writer.close()
         await writer.wait_closed()

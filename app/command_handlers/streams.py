@@ -2,48 +2,44 @@
 import asyncio
 from collections.abc import Sequence
 
-from app.commands import Arity, CommandContext, NullBulkString, command
-from app.parser import RESPError
-from app.storage import get_storage
+from app.commands import Arity, CommandContext, command
+from app.parser import RESPError, NullBulkString
 
 
 @command(
     name=b"TYPE",
     arity=Arity(1, 1),
-    flags={"readonly", "fast"}
+    flags={"readonly", "fast", "streams"}
 )
 def cmd_type(ctx: CommandContext, args: list[bytes]) -> str:
     key = args[0]
-    storage = get_storage()
-    return storage.type(key) or "none"
+    return ctx.app_state.storage.type(key) or "none"
 
 
 @command(
     name=b"XADD",
     arity=Arity(3, None),
-    flags={"write"}
+    flags={"write", "streams"}
 )
 def cmd_xadd(ctx: CommandContext, args: list[bytes]) -> str:
     stream_key, stream_id, *payload = args
-    storage = get_storage()
-    return storage.xadd(stream_key, stream_id, payload)
+    return ctx.app_state.storage.xadd(stream_key, stream_id, payload)
 
 
 @command(
     name=b"XRANGE",
     arity=Arity(3, 3),
-    flags={"readonly"}
+    flags={"readonly", "streams"}
 )
 def cmd_xrange(ctx: CommandContext, args: list[bytes]) -> list[list[str | dict[bytes, bytes]]]:
     stream_key, start, end = args
-    storage = get_storage()
-    return storage.xrange(stream_key, start, end)
+    return ctx.app_state.storage.xrange(stream_key, start, end)
 
 
 @command(
     name=b"XREAD",
     arity=Arity(3, None),
-    flags={"readonly"}
+    flags={"readonly", "streams"}
 )
 async def cmd_xread(ctx: CommandContext, args: list[bytes]) -> list[list[bytes | str | list[list[str | dict[bytes, bytes]]]]] | NullBulkString:
     parse_index = 0
@@ -80,8 +76,8 @@ async def cmd_xread(ctx: CommandContext, args: list[bytes]) -> list[list[bytes |
     keys = keys_and_ids[:split_index]
     ids = keys_and_ids[split_index:]
     resolved_ids = resolve_xread_start_ids(keys, ids)
-    storage = get_storage()
-    entries = storage.xread_streams(keys, resolved_ids)
+    
+    entries = ctx.app_state.storage.xread_streams(keys, resolved_ids)
     if entries:
         return entries
     elif block_timeout_seconds is None:
@@ -89,14 +85,14 @@ async def cmd_xread(ctx: CommandContext, args: list[bytes]) -> list[list[bytes |
     elif block_timeout_seconds == 0:
         while True:
             await asyncio.sleep(0.05)
-            entries = storage.xread_streams(keys, resolved_ids)
+            entries = ctx.app_state.storage.xread_streams(keys, resolved_ids)
             if entries:
                 return entries
     else:
         deadline = asyncio.get_running_loop().time() + block_timeout_seconds
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.05)
-            entries = storage.xread_streams(keys, resolved_ids)
+            entries = ctx.app_state.storage.xread_streams(keys, resolved_ids)
             if entries:
                 return entries
         else:

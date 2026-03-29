@@ -1,10 +1,13 @@
 from unittest.mock import patch
+import logging
 import os
 import tempfile
 
 import pytest # pyright: ignore[reportMissingImports] 
 
 from app.parser import RESPError
+from app.config import ServerConfig
+from app.state import AppState
 from app.storage import CacheStorage
 
 
@@ -46,18 +49,14 @@ def test_cache_storage_ttl_expires_and_deletes_key(mock_monotonic):
 	assert "temp_key" not in storage._storage
 
 
-def test_get_storage_returns_singleton_instance():
-	import app.storage
+def test_app_state_uses_provided_storage_instance():
+	storage = CacheStorage()
+	app_state = AppState(ServerConfig("127.0.0.1", 6379), storage, logging.getLogger(__name__))
 
-	original_instance = app.storage._storage_instance
-	app.storage._storage_instance = None
-	try:
-		instance1 = app.storage.get_storage()
-		instance2 = app.storage.get_storage()
-		assert instance1 is instance2
-		assert isinstance(instance1, CacheStorage)
-	finally:
-		app.storage._storage_instance = original_instance
+	storage.set(b"hello", b"world")
+
+	assert app_state.storage is storage
+	assert app_state.storage.get(b"hello") == b"world"
 
 
 # ---------- BLPOP tests ----------
