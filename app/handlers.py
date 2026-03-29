@@ -43,7 +43,7 @@ async def handle_client(
                 command,
                 app_state,
                 from_replication=False,
-                replica_writer=writer,
+                connection_writer=writer,
                 session=session
             )
             response = await dispatch_command(command, parser, app_state, session, ctx)

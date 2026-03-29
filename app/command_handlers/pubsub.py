@@ -28,7 +28,7 @@ def _subscription_reply(kind: bytes, channel: bytes | None, count: int) -> bytes
     allowed_in_subscribe=True
 )
 def cmd_subscribe(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
-    writer = ctx.exec_ctx.replica_writer
+    writer = ctx.exec_ctx.connection_writer
     if writer is None:
         raise RESPError("ERR write error")
     
@@ -57,7 +57,7 @@ def cmd_unsubscribe(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
         args if args else list(ctx.session.subscribed_channels)
     )
     
-    writer = ctx.exec_ctx.replica_writer
+    writer = ctx.exec_ctx.connection_writer
     if writer is None:
         raise RESPError("ERR write error")
     

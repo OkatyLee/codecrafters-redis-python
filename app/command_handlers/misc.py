@@ -1,7 +1,7 @@
 import asyncio
 import os
 
-from app.commands import Arity, Arity, CommandContext, command
+from app.commands import Arity, CommandContext, command
 from app.parser import RESPError
 from app.resp_types import BaseRESPType, BulkStringType, IntegerType, SimpleStringType, ArrayType, RawResponse
 
@@ -48,7 +48,7 @@ def cmd_replconf(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
             return ArrayType([BulkStringType(val) for val in [b"REPLCONF", b"ACK", str(replica_offset).encode()]])
         case b"ACK":
             offset = args[1]
-            ctx.app_state.set_replica_ack_offset(ctx.exec_ctx.replica_writer, int(offset))
+            ctx.app_state.set_replica_ack_offset(ctx.exec_ctx.connection_writer, int(offset))
             return RawResponse(b"")
         case _:
             return SimpleStringType("OK")
@@ -64,7 +64,7 @@ def cmd_psync(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     config = ctx.app_state.config
     if args != [b"?", b"-1"]:
         raise RESPError("ERR invalid arguments for PSYNC")
-    ctx.app_state.register_replica(None, ctx.exec_ctx.replica_writer)
+    ctx.app_state.register_replica(None, ctx.exec_ctx.connection_writer)
     repl_id = config.master_perlid
     offset = config.master_repl_offset
     rdb_path = os.path.join(config.dir, config.dbfilename)

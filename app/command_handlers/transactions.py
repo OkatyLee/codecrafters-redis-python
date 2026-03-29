@@ -1,8 +1,8 @@
 
 from app.command_executor import build_exec_ctx, execute_single_command
-from app.commands import Arity, CommandContext, command
+from app.commands import Arity, CommandContext, command, get_command_spec
 from app.parser import RESPError
-from app.resp_types import BaseRESPType, SimpleStringType, RawResponse
+from app.resp_types import BaseRESPType, RawResponse, SimpleErrorType, SimpleStringType
 
 
 def _encode_raw_resp_array(responses: list[bytes]) -> bytes:
@@ -53,13 +53,17 @@ async def cmd_exec(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     ctx.session.in_multi = False
     responses: list[BaseRESPType] = []
     for queued in commands_to_execute:
+        spec = get_command_spec(queued[0])
         queued_ctx = build_exec_ctx(
             queued,
             ctx.app_state,
             from_replication=False,
-            replica_writer=ctx.exec_ctx.replica_writer,
+            connection_writer=ctx.exec_ctx.connection_writer,
             session=ctx.session
         )
+        if spec is None:
+            responses.append(SimpleErrorType("ERR unknown command"))
+            continue
         responses.append(
             await execute_single_command(
                 CommandContext(
@@ -68,7 +72,8 @@ async def cmd_exec(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
                     session=ctx.session,
                     exec_ctx=queued_ctx,
                 ),
-                queued,
+                spec,
+                queued[1:],
             )
         )
     encoded_responses = [resp.encode() for resp in responses]

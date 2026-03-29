@@ -2,7 +2,6 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from time import time
-from tkinter import N
 from typing import Any, Callable
 
 from app.parser import RESPError
@@ -233,23 +232,26 @@ class StreamType(ValueType):
         return resolved_id
     
     def xrange(self, key: RedisKey, start: str | bytes, end: str | bytes) -> list[tuple[str, dict[bytes, bytes]]]:
-        if isinstance(start, bytes):
-            start = start.decode()
-        if isinstance(end, bytes):
-            end = end.decode()
-
         stream = self._get_value(key)
         if stream is None:
             return []
         if not self._is_stream_value(stream):
             raise TypeError(WRONGTYPE_ERROR)
 
+        if isinstance(start, bytes):
+            start = start.decode()
+        if isinstance(end, bytes):
+            end = end.decode()
+
         entries = stream.get("entries", [])
         result = []
         for entry_id, entry in entries:
-            if entry_id < start and start != '-':
+            entry_ts, entry_cntr = self._parse_id(entry_id)
+            start_ts, start_cntr = self._parse_id(start) if isinstance(start, str) and start != "-" else (0, 0)
+            end_ts, end_cntr = self._parse_id(end) if isinstance(end, str) and end != "+" else (float('inf'), float('inf'))
+            if start != '-' and (entry_ts, entry_cntr) < (start_ts, start_cntr):
                 continue
-            if entry_id > end and end != '+':
+            if (entry_ts, entry_cntr) > (end_ts, end_cntr) and end != '+':
                 break
             result.append((entry_id, entry))
         return result

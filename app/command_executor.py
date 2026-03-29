@@ -4,32 +4,22 @@ import asyncio
 from collections.abc import Sequence
 import inspect
 
-from app.commands import COMMANDS, CommandContext, ExecCtx
-from app.parser import RESPError, RESPParser
-from app.resp_types import BaseRESPType, SimpleErrorType, RawResponse
+from app.commands import CommandContext, CommandSpec, ExecCtx
+from app.parser import RESPError
+from app.resp_types import BaseRESPType, SimpleErrorType
 from app.session import ClientSession
 from app.state import AppState
 
 
-
-
-
-def encode_command_result(parser: RESPParser, result: BaseRESPType) -> bytes:
-    return result.encode()
-
-
 async def execute_single_command(
     ctx: CommandContext,
+    spec: CommandSpec,
     args: list[bytes],
 ) -> BaseRESPType:
-    name, *args = args
-    spec = COMMANDS.get(name.upper())
+    handler = spec.handler
     
-    if spec is None:
-        return SimpleErrorType("ERR unknown command")
-    
-    try: 
-        result = spec.handler(ctx, args)
+    try:
+        result = handler(ctx, args)
         response: BaseRESPType = await result if inspect.isawaitable(result) else result
     except (ValueError, RESPError, TypeError, AssertionError) as e:
         response = SimpleErrorType(str(e))
@@ -41,14 +31,14 @@ def build_exec_ctx(
     app_state: AppState,
     *,
     from_replication: bool,
-    replica_writer: asyncio.StreamWriter | None = None,
+    connection_writer: asyncio.StreamWriter | None = None,
     session: ClientSession | None = None
 ) -> ExecCtx:
     return ExecCtx(
         from_replication=from_replication,
         raw_resp_command=encode_command_as_resp_array(command),
         propagate=lambda payload, state=app_state: propagate_to_replicas(state, payload),
-        replica_writer=replica_writer,
+        connection_writer=connection_writer,
         session=session,
     )
     
@@ -61,16 +51,16 @@ async def propagate_to_replicas(app_state: AppState | None, payload: bytes) -> N
 
     stale_writers: list[asyncio.StreamWriter] = []
     
-    async def _write_drain(replica_writer: asyncio.StreamWriter, payload: bytes):
+    async def _write_drain(connection_writer: asyncio.StreamWriter, payload: bytes):
         try:
-            replica_writer.write(payload)
-            await replica_writer.drain()
+            connection_writer.write(payload)
+            await connection_writer.drain()
         except Exception:
-            stale_writers.append(replica_writer)
+            stale_writers.append(connection_writer)
             
     async with asyncio.TaskGroup() as tg:
-        for replica_writer in list(app_state.replica_writers):
-            tg.create_task(_write_drain(replica_writer, payload))
+        for connection_writer in list(app_state.replica_writers):
+            tg.create_task(_write_drain(connection_writer, payload))
 
 
     async def _unregister_stale_replica(stale_writer: asyncio.StreamWriter):

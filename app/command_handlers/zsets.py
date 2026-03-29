@@ -19,7 +19,7 @@ def cmd_zadd(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
 @command(
     name=b"ZRANK",
     arity=Arity(2, 2),
-    flags={"read", "zset"}
+    flags={"readonly", "zset"}
 )
 def cmd_zrank(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, member = args
@@ -30,7 +30,7 @@ def cmd_zrank(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
 @command(
     name=b"ZRANGE",
     arity=Arity(3, 3),
-    flags={"read", "zset"}
+    flags={"readonly", "zset"}
 )
 def cmd_zrange(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, start, end = args
@@ -41,7 +41,7 @@ def cmd_zrange(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
 @command(
     name=b"ZCARD",
     arity=Arity(1, 1),
-    flags={"read", "zset"}
+    flags={"readonly", "zset"}
 )
 def cmd_zcard(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key = args[0]
@@ -52,7 +52,7 @@ def cmd_zcard(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
 @command(
     name=b"ZSCORE",
     arity=Arity(2, 2),
-    flags={"read", "zset"}
+    flags={"readonly", "zset"}
 )
 def cmd_zscore(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, member = args

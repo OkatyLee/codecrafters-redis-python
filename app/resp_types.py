@@ -65,22 +65,3 @@ class RawResponse(BaseRESPType):
     value: bytes
     def encode(self) -> bytes:
         return self.value
-
-
-def build_stream_entry(entry_id: str, fields: dict[bytes, bytes]) -> ArrayType:
-    stream_id = BulkStringType(entry_id.encode())
-    _fields = []
-    for k, v in fields.items():
-        _fields.append(BulkStringType(k))
-        _fields.append(BulkStringType(v))
-    return ArrayType(
-        [
-            stream_id, 
-            ArrayType(_fields)
-        ]
-    )
-
-
-def build_stream_read_result(key: bytes, entries: list[ArrayType]) -> ArrayType:
-    return ArrayType([BulkStringType(key), ArrayType(entries)])
-

@@ -10,8 +10,6 @@ from app.state import AppState
 type PropagateCallback = Callable[[bytes], Awaitable[None]]
 type CommandHandler = Callable[["CommandContext", list[bytes]], Awaitable[BaseRESPType] | BaseRESPType]
 
-COMMAND_WRITE_FLAGS: dict[bytes, bool] = {}
-
 COMMANDS: dict[bytes, "CommandSpec"] = {}
 
 
@@ -79,6 +77,10 @@ def command(
 
     return decorator
 
+
+def get_command_spec(name: bytes) -> "CommandSpec | None":
+    return COMMANDS.get(name.upper())
+
 @dataclass(slots=True)
 class ExecCtx:
     """
@@ -87,14 +89,14 @@ class ExecCtx:
         from_replication (bool): Flag indicating whether the command is from replication.
         raw_resp_command (bytes): The raw RESP command.
         propagate (PropagateCallback): Callback for propagating changes.
-        replica_writer (StreamWriter | None): The writer for the replica connection.
+        connection_writer (StreamWriter | None): The writer for the connection.
         session (ClientSession | None): The client session.
     """
 
     from_replication: bool
     raw_resp_command: bytes
     propagate: PropagateCallback
-    replica_writer: StreamWriter | None = None
+    connection_writer: StreamWriter | None = None
     session: ClientSession | None = None
 
 
@@ -112,5 +114,4 @@ class CommandContext:
     app_state: AppState
     session: ClientSession
     exec_ctx: ExecCtx
-
 

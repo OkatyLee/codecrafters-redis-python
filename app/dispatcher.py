@@ -1,7 +1,7 @@
 
 
 from app.command_executor import execute_single_command
-from app.commands import COMMANDS, CommandContext, ExecCtx
+from app.commands import CommandContext, ExecCtx, get_command_spec
 import app.command_handlers  # noqa: F401
 from app.parser import RESPParser
 from app.resp_types import BaseRESPType, SimpleErrorType, SimpleStringType
@@ -22,7 +22,7 @@ async def dispatch_command(
     name = command[0].upper()
     args = command[1:]
     
-    spec = COMMANDS.get(name)
+    spec = get_command_spec(name)
     
     if spec is None:
         return SimpleErrorType("ERR unknown command")
@@ -48,7 +48,7 @@ async def dispatch_command(
         session=session,
         exec_ctx=exec_ctx,
     )
-    response = await execute_single_command(ctx, command)
+    response = await execute_single_command(ctx, spec, args)
 
     if "write" in spec.flags and not exec_ctx.from_replication and not isinstance(response, SimpleErrorType):
         await exec_ctx.propagate(exec_ctx.raw_resp_command)

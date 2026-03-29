@@ -1,5 +1,3 @@
-import asyncio
-from collections import defaultdict
 from random import randint
 
 from app.session import ACLUser

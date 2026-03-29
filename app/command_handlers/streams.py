@@ -3,7 +3,27 @@ from collections.abc import Sequence
 
 from app.commands import Arity, CommandContext, command
 from app.parser import RESPError
-from app.resp_types import BaseRESPType, SimpleStringType, ArrayType, NullBulkStringType, build_stream_entry, build_stream_read_result
+from app.resp_types import BaseRESPType, BulkStringType, SimpleStringType, ArrayType, NullBulkStringType
+
+
+
+
+def build_stream_entry(entry_id: str, fields: dict[bytes, bytes]) -> ArrayType:
+    stream_id = BulkStringType(entry_id.encode())
+    _fields = []
+    for k, v in fields.items():
+        _fields.append(BulkStringType(k))
+        _fields.append(BulkStringType(v))
+    return ArrayType(
+        [
+            stream_id, 
+            ArrayType(_fields)
+        ]
+    )
+
+
+def build_stream_read_result(key: bytes, entries: list[ArrayType]) -> ArrayType:
+    return ArrayType([BulkStringType(key), ArrayType(entries)])
 
 
 @command(

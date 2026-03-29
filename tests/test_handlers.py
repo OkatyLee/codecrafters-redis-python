@@ -660,6 +660,71 @@ async def test_xread_streams_returns_new_entries_after_id():
 
 
 @pytest.mark.asyncio
+async def test_xrange_compares_stream_ids_numerically():
+    server, app_state = await start_test_server()
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$4\r\nXADD\r\n$8\r\nmystream\r\n$3\r\n2-0\r\n$1\r\nf\r\n$1\r\na\r\n",
+    )
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$4\r\nXADD\r\n$8\r\nmystream\r\n$4\r\n10-0\r\n$1\r\ng\r\n$1\r\nb\r\n",
+    )
+
+    response = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*4\r\n$6\r\nXRANGE\r\n$8\r\nmystream\r\n$3\r\n2-0\r\n$4\r\n10-0\r\n",
+    )
+
+    assert response == [
+        [b"2-0", [b"f", b"a"]],
+        [b"10-0", [b"g", b"b"]],
+    ]
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_xread_compares_stream_ids_numerically():
+    server, app_state = await start_test_server()
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$4\r\nXADD\r\n$8\r\nmystream\r\n$3\r\n2-0\r\n$1\r\nf\r\n$1\r\na\r\n",
+    )
+    await send_command_and_read_response(
+        reader,
+        writer,
+        b"*5\r\n$4\r\nXADD\r\n$8\r\nmystream\r\n$4\r\n10-0\r\n$1\r\ng\r\n$1\r\nb\r\n",
+    )
+
+    response = await send_command_and_parse_response(
+        reader,
+        writer,
+        b"*4\r\n$5\r\nXREAD\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$3\r\n2-0\r\n",
+    )
+
+    assert response == [[b"mystream", [[b"10-0", [b"g", b"b"]]]]]
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_xread_block_streams_unblocks_on_new_entry():
     server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()
