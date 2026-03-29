@@ -2,51 +2,37 @@
 
 import asyncio
 from collections.abc import Sequence
+import inspect
 
 from app.commands import COMMANDS, CommandContext, ExecCtx
-from app.parser import RESPError, RESPParser, RawResponse, NullBulkString, NullArray
+from app.parser import RESPError, RESPParser
+from app.resp_types import BaseRESPType, SimpleErrorType, RawResponse
 from app.session import ClientSession
 from app.state import AppState
 
 
 
 
-def encode_command_result(parser: RESPParser, result: object) -> bytes:
-    if isinstance(result, RawResponse):
-        return result.payload
-    elif isinstance(result, str):
-        return parser.encode_simple_string(result)
-    elif isinstance(result, int):
-        return parser.encode_integer(result)
-    elif isinstance(result, bytes):
-        return parser.encode_bulk_string(result)
-    elif isinstance(result, (list, tuple)):
-        return parser.encode_array(result)
-    elif isinstance(result, NullArray):
-        return parser.encode_null_array()
-    elif isinstance(result, NullBulkString):
-        return parser.encode_null()
-    else:
-        raise ValueError("Unsupported result type")
-    
-    
+
+def encode_command_result(parser: RESPParser, result: BaseRESPType) -> bytes:
+    return result.encode()
+
+
 async def execute_single_command(
     ctx: CommandContext,
     args: list[bytes],
-) -> bytes:
+) -> BaseRESPType:
     name, *args = args
     spec = COMMANDS.get(name.upper())
     
     if spec is None:
-        return ctx.parser.encode_simple_error("unknown command")
+        return SimpleErrorType("ERR unknown command")
     
     try: 
-        response = spec.handler(ctx, args)
-        if asyncio.iscoroutine(response):
-            response = await response
-        response = encode_command_result(ctx.parser, response)
-    except (ValueError, TypeError, RESPError, AssertionError) as e:
-        response = ctx.parser.encode_simple_error(str(e))
+        result = spec.handler(ctx, args)
+        response: BaseRESPType = await result if inspect.isawaitable(result) else result
+    except (ValueError, RESPError, TypeError, AssertionError) as e:
+        response = SimpleErrorType(str(e))
     return response
 
 

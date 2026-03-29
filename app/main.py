@@ -7,6 +7,7 @@ from app.config import ServerConfig
 from app.dispatcher import dispatch_command
 from app.handlers import build_exec_ctx, handle_client
 from app.parser import RESPParser
+from app.resp_types import ArrayType, BulkStringType
 from app.session import ClientSession
 from app.state import AppState
 from app.storage import CacheStorage
@@ -100,7 +101,7 @@ async def replication_handshake_and_loop(
     try:
         app_state.logger.info("Starting replication handshake")
 
-        writer.write(parser.encode_array([b"PING"]))
+        writer.write(ArrayType([BulkStringType(b"PING")]).encode())
         await writer.drain()
         response = await parser.parse()
         if response != "PONG":
@@ -108,24 +109,24 @@ async def replication_handshake_and_loop(
             return
 
         writer.write(
-            parser.encode_array(
-                [b"REPLCONF", b"listening-port", str(my_listening_port).encode()]
-            )
+            ArrayType([BulkStringType(val) for val in [b"REPLCONF", b"listening-port", str(my_listening_port).encode()]])
+            .encode()
         )
+        
         await writer.drain()
         response = await parser.parse()
         if response != "OK":
             app_state.logger.error("Received unexpected response to REPLCONF listening-port")
             return
 
-        writer.write(parser.encode_array([b"REPLCONF", b"capa", b"psync2"]))
+        writer.write(ArrayType([BulkStringType(val) for val in [b"REPLCONF", b"capa", b"psync2"]]).encode())
         await writer.drain()
         response = await parser.parse()
         if response != "OK":
             app_state.logger.error("Received unexpected response to REPLCONF capa")
             return
 
-        writer.write(parser.encode_array([b"PSYNC", b"?", b"-1"]))
+        writer.write(ArrayType([BulkStringType(val) for val in [b"PSYNC", b"?", b"-1"]]).encode())
         await writer.drain()
         response = await parser.parse()
         if not isinstance(response, str) or not response.startswith("FULLRESYNC "):
@@ -155,7 +156,7 @@ async def replication_handshake_and_loop(
             )
             response = await dispatch_command(command, parser, app_state, replication_session, ctx)
             if command[:2] == [b"REPLCONF", b"GETACK"] and response:
-                writer.write(response)
+                writer.write(response.encode())
                 await writer.drain()
     except Exception as e:
         app_state.logger.error(f"Replication error: {e}")

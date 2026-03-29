@@ -28,10 +28,10 @@ def test_cache_storage_get_missing_key_returns_none():
 def test_cache_storage_invalid_ttl_raises_value_error():
 	storage = CacheStorage()
 
-	with pytest.raises(ValueError, match="-ERR invalid expire time in set"):
+	with pytest.raises(ValueError, match="ERR invalid expire time in set"):
 		storage.set("my_key", "my_value", ttl=0)
 
-	with pytest.raises(ValueError, match="-ERR invalid expire time in set"):
+	with pytest.raises(ValueError, match="ERR invalid expire time in set"):
 		storage.set("my_key", "my_value", ttl=-1.5)
 
 

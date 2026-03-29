@@ -1,5 +1,6 @@
 from app.commands import Arity, CommandContext, command
-from app.parser import RESPError, NullBulkString
+from app.parser import RESPError
+from app.resp_types import BaseRESPType, BulkStringType, IntegerType, NullBulkStringType, SimpleStringType
 
 
 @command(
@@ -7,10 +8,10 @@ from app.parser import RESPError, NullBulkString
     arity=Arity(2, None),
     flags={"write", "strings"}
 )
-def cmd_set(ctx: CommandContext, args: list[bytes]) -> str:
+def cmd_set(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, value, opt_args = args[0], args[1], args[2:]
     if len(opt_args) % 2 != 0:
-        raise RESPError("syntax error")
+        raise RESPError("ERR syntax error")
 
     params = {
         option.upper(): option_value
@@ -18,9 +19,9 @@ def cmd_set(ctx: CommandContext, args: list[bytes]) -> str:
     }
     unknown_options = [opt for opt in params if opt not in (b"EX", b"PX")]
     if unknown_options:
-        raise RESPError("syntax error")
+        raise RESPError("ERR syntax error")
     if params.get(b"EX") and params.get(b"PX"):
-        raise RESPError("syntax error. Only one of EX or PX is allowed")
+        raise RESPError("ERR syntax error. Only one of EX or PX is allowed")
     px = params.get(b"PX")
     if px is not None:
         px = int(px) / 1000
@@ -29,8 +30,8 @@ def cmd_set(ctx: CommandContext, args: list[bytes]) -> str:
         ex = int(ex)
     ttl = ex if ex is not None else px
     res = ctx.app_state.storage.set(key, value, ttl)
-    if res: return "OK" 
-    raise RESPError("Failed to set key")
+    if res: return SimpleStringType("OK")
+    raise RESPError("ERR Failed to set key")
 
     
 @command(
@@ -38,12 +39,12 @@ def cmd_set(ctx: CommandContext, args: list[bytes]) -> str:
     arity=Arity(1, 1),
     flags={"readonly", "strings"}
 )
-def cmd_get(ctx: CommandContext, args: list[bytes]) -> bytes | NullBulkString:
+def cmd_get(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key = args[0]
     value = ctx.app_state.storage.get(key)
     if value is None:
-        return NullBulkString()
-    return value
+        return NullBulkStringType()
+    return BulkStringType(value)
 
 
 @command(
@@ -51,13 +52,13 @@ def cmd_get(ctx: CommandContext, args: list[bytes]) -> bytes | NullBulkString:
     arity=Arity(1, 1),
     flags={"write", "strings"}
 )
-def cmd_del(ctx: CommandContext, args: list[bytes]) -> str:
+def cmd_del(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key = args[0]
     res = ctx.app_state.storage.delete(key)
     if res:
-        return "OK"
+        return SimpleStringType("OK")
     
-    raise RESPError("Failed to delete key")
+    raise RESPError("ERR Failed to delete key")
 
 
 @command(
@@ -65,6 +66,6 @@ def cmd_del(ctx: CommandContext, args: list[bytes]) -> str:
     arity=Arity(1, 1),
     flags={"write", "strings"}
 )
-def cmd_incr(ctx: CommandContext, args: list[bytes]) -> int:
+def cmd_incr(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key = args[0]
-    return ctx.app_state.storage.incr(key)
+    return IntegerType(ctx.app_state.storage.incr(key))

@@ -391,7 +391,7 @@ async def test_lrange_wrongtype_returns_error_for_string_and_sorted_set_keys():
         b"*4\r\n$6\r\nLRANGE\r\n$8\r\nzset_key\r\n$1\r\n0\r\n$2\r\n-1\r\n",
     )
 
-    expected = b"-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+    expected = b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
     assert wrongtype_on_string == expected
     assert wrongtype_on_zset == expected
 
@@ -651,7 +651,7 @@ async def test_xread_streams_returns_new_entries_after_id():
         b"*4\r\n$5\r\nXREAD\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$3\r\n0-0\r\n",
     )
 
-    assert response == [[b"mystream", [["1-1", [b"f", b"v"]]]]]
+    assert response == [[b"mystream", [[b"1-1", [b"f", b"v"]]]]]
 
     writer.close()
     await writer.wait_closed()
@@ -683,7 +683,7 @@ async def test_xread_block_streams_unblocks_on_new_entry():
         )
 
     xread_response, xadd_response = await asyncio.gather(do_xread_block(), do_xadd_later())
-
+    print(xread_response)
     assert xadd_response.startswith(b"+")
     assert isinstance(xread_response, list)
     assert len(xread_response) > 0
@@ -882,7 +882,7 @@ async def test_xrange_wrongtype_returns_error_for_string_and_sorted_set_keys():
         b"*4\r\n$6\r\nXRANGE\r\n$10\r\nnotstream2\r\n$1\r\n-\r\n$1\r\n+\r\n",
     )
 
-    expected = b"-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+    expected = b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
     assert wrongtype_on_string == expected
     assert wrongtype_on_zset == expected
 
@@ -1683,8 +1683,8 @@ async def test_setting_default_password_requires_auth_for_new_connections_only()
 
     assert setuser_response == b"+OK\r\n"
     assert old_session_ping == b"+PONG\r\n"
-    assert noauth_response == b"-ERR NOAUTH  Authentication required.\r\n"
-    assert wrongpass_response == b"-ERR WRONGPASS invalid username-password pair or user is disabled.\r\n"
+    assert noauth_response == b"-NOAUTH  Authentication required.\r\n"
+    assert wrongpass_response == b"-WRONGPASS invalid username-password pair or user is disabled.\r\n"
     assert auth_response == b"+OK\r\n"
     assert whoami_response == b"default"
     assert ping_after_auth == b"+PONG\r\n"
@@ -2277,7 +2277,7 @@ async def test_geospatial_command_geopos_wrongtype_returns_error_for_string_key(
         b"*3\r\n$6\r\nGEOPOS\r\n$7\r\nstr_key\r\n$3\r\nfoo\r\n",
     )
 
-    expected = b"-ERR WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
+    expected = b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
     assert wrongtype_result == expected
 
     writer.close()

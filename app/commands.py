@@ -3,11 +3,12 @@ from typing import Awaitable, Callable
 from asyncio import StreamWriter
 
 from app.parser import RESPParser
+from app.resp_types import BaseRESPType
 from app.session import ClientSession
 from app.state import AppState
 
 type PropagateCallback = Callable[[bytes], Awaitable[None]]
-type CommandHandler = Callable[["CommandContext", list[bytes]], Awaitable[object] | object]
+type CommandHandler = Callable[["CommandContext", list[bytes]], Awaitable[BaseRESPType] | BaseRESPType]
 
 COMMAND_WRITE_FLAGS: dict[bytes, bool] = {}
 

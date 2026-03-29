@@ -2,7 +2,8 @@ import asyncio
 import os
 
 from app.commands import Arity, Arity, CommandContext, command
-from app.parser import RESPError, RawResponse
+from app.parser import RESPError
+from app.resp_types import BaseRESPType, BulkStringType, IntegerType, SimpleStringType, ArrayType, RawResponse
 
 
 EMPTY_RDB_HEX = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2"
@@ -14,10 +15,10 @@ EMPTY_RDB_BYTES = bytes.fromhex(EMPTY_RDB_HEX)
     arity=Arity(0, 1),
     flags={"readonly", "misc"}
 )
-def cmd_info(ctx: CommandContext, args: list[bytes]) -> bytes:
+def cmd_info(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     config = ctx.app_state.config
     if config is None:
-        raise ValueError("Config is None")
+        raise ValueError("ERR Config is None")
     role = b"role:" + config.role.encode()
     master_replid = (
         b"master_replid:" + config.master_perlid.encode()
@@ -25,7 +26,7 @@ def cmd_info(ctx: CommandContext, args: list[bytes]) -> bytes:
         else b"master_replid:"
     )
     master_repl_offset = b"master_repl_offset:" + str(config.master_repl_offset).encode()
-    return role + b"\r\n" + master_replid + b"\r\n" + master_repl_offset
+    return BulkStringType(role + b"\r\n" + master_replid + b"\r\n" + master_repl_offset)
 
 
 @command(
@@ -34,23 +35,23 @@ def cmd_info(ctx: CommandContext, args: list[bytes]) -> bytes:
     flags={"readonly", "replication", "misc"}
 
 )
-def cmd_replconf(ctx: CommandContext, args: list[bytes]) -> str | list[bytes] | bytes:
+def cmd_replconf(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     option = args[0].upper()
     
     match option:
         case b"LISTENING-PORT":
             replica_port = args[1]
             ctx.app_state.register_replica(int(replica_port), None)
-            return "OK"
+            return SimpleStringType("OK")
         case b"GETACK":
             replica_offset = ctx.app_state.config.get_replica_offset()
-            return [b"REPLCONF", b"ACK", str(replica_offset).encode()]
+            return ArrayType([BulkStringType(val) for val in [b"REPLCONF", b"ACK", str(replica_offset).encode()]])
         case b"ACK":
             offset = args[1]
             ctx.app_state.set_replica_ack_offset(ctx.exec_ctx.replica_writer, int(offset))
-            return b""
+            return RawResponse(b"")
         case _:
-            return "OK"
+            return SimpleStringType("OK")
         
         
         
@@ -59,10 +60,10 @@ def cmd_replconf(ctx: CommandContext, args: list[bytes]) -> str | list[bytes] | 
     arity=Arity(2, 2),
     flags={"readonly", "replication", "misc"}
 )
-def cmd_psync(ctx: CommandContext, args: list[bytes]) -> RawResponse:
+def cmd_psync(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     config = ctx.app_state.config
     if args != [b"?", b"-1"]:
-        raise RESPError("invalid arguments for PSYNC")
+        raise RESPError("ERR invalid arguments for PSYNC")
     ctx.app_state.register_replica(None, ctx.exec_ctx.replica_writer)
     repl_id = config.master_perlid
     offset = config.master_repl_offset
@@ -75,10 +76,10 @@ def cmd_psync(ctx: CommandContext, args: list[bytes]) -> RawResponse:
         rdb_data = EMPTY_RDB_BYTES
     if rdb_data == EMPTY_RDB_BYTES:
         ctx.app_state.logger.info("RDB files not found. Using empty RDB data")
-    payload = ctx.parser.encode_simple_string(
+    payload = SimpleStringType(
         f"FULLRESYNC {repl_id} {offset}"
-    ) + ctx.parser.encode_bulk_string(rdb_data)
-    return RawResponse(payload=payload)
+    ).encode() + BulkStringType(rdb_data).encode()
+    return RawResponse(value=payload)
     
     
     
@@ -87,7 +88,7 @@ def cmd_psync(ctx: CommandContext, args: list[bytes]) -> RawResponse:
     arity=Arity(2, 2),
     flags={"readonly", "replication", "coroutine", "misc"}
 )
-async def cmd_wait(ctx: CommandContext, args: list[bytes]) -> int:
+async def cmd_wait(ctx: CommandContext, args: list[bytes]) -> IntegerType:
     config = ctx.app_state.config
     numreplicas = int(args[0])
     timeout = int(args[1])
@@ -116,7 +117,7 @@ async def cmd_wait(ctx: CommandContext, args: list[bytes]) -> int:
 
         # Send GETACK directly — bypassing propagate_to_replicas so that
         # master_repl_offset is NOT inflated by this management command.
-        getack_cmd = ctx.parser.encode_array([b"REPLCONF", b"GETACK", b"*"])
+        getack_cmd = ArrayType([BulkStringType(val) for val in [b"REPLCONF", b"GETACK", b"*"]]).encode()
         stale: list[asyncio.StreamWriter] = []
         for replica in list(replicas):
             try:
@@ -136,7 +137,7 @@ async def cmd_wait(ctx: CommandContext, args: list[bytes]) -> int:
 
         return count_acked()
     response = await handle_wait_command(ctx, numreplicas, timeout)
-    return response
+    return IntegerType(response)
 
 
 @command(
@@ -144,14 +145,14 @@ async def cmd_wait(ctx: CommandContext, args: list[bytes]) -> int:
     arity=Arity(2, 2),
     flags={"readonly", "misc"}
 )
-def cmd_config(ctx: CommandContext, args: list[bytes]) -> list[bytes]:
+def cmd_config(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     config = ctx.app_state.config
     method, attr = args[0], args[1]
     if method.upper() != b"GET":
-        raise RESPError("only CONFIG GET is supported")
+        raise RESPError("ERR only CONFIG GET is supported")
     if not hasattr(config, attr.decode()):
-        raise RESPError("Invalid CONFIG attribute")
-    return [attr, getattr(config, attr.decode()).encode()]
+        raise RESPError("ERR Invalid CONFIG attribute")
+    return ArrayType([BulkStringType(val) for val in [attr, getattr(config, attr.decode()).encode()]])
     
 
 @command(
@@ -159,12 +160,12 @@ def cmd_config(ctx: CommandContext, args: list[bytes]) -> list[bytes]:
     arity=Arity(0, 0),
     flags={"readonly", "misc"}
 )
-def cmd_save(ctx: CommandContext, args: list[bytes]) -> str:
+def cmd_save(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     config = ctx.app_state.config
     success = ctx.app_state.storage.save(config.dir, config.dbfilename)
     if not success:
-        raise RESPError("Error saving data")
-    return "OK"
+        raise RESPError("ERR Error saving data")
+    return SimpleStringType("OK")
 
 
 @command(
@@ -172,13 +173,13 @@ def cmd_save(ctx: CommandContext, args: list[bytes]) -> str:
     arity=Arity(0, 0),
     flags={"readonly", "coroutine", "misc"}
 )
-async def cmd_bgsave(ctx: CommandContext, args: list[bytes]) -> str:
+async def cmd_bgsave(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     config = ctx.app_state.config
     async def start_bgsave():
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, ctx.app_state.storage.save, config.dir, config.dbfilename)
     asyncio.create_task(start_bgsave())
-    return "Background saving started"
+    return SimpleStringType("Background saving started")
 
 
 @command(
@@ -186,8 +187,8 @@ async def cmd_bgsave(ctx: CommandContext, args: list[bytes]) -> str:
     arity=Arity(1, 1),
     flags={"readonly", "misc"}
 )
-def cmd_keys(ctx: CommandContext, args: list[bytes]) -> list[bytes]:
+def cmd_keys(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     pattern = args[0] if args else b"*"
-    return ctx.app_state.storage.keys(pattern)
+    return ArrayType([BulkStringType(key) for key in ctx.app_state.storage.keys(pattern)])
 
 

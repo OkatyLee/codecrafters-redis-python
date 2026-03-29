@@ -1,5 +1,5 @@
 from app.commands import Arity, CommandContext, command
-from app.parser import NullArray, NullBulkString
+from app.resp_types import ArrayType, BaseRESPType, BulkStringType, IntegerType, NullArrayType, NullBulkStringType, NullBulkStringType
 
 
 @command(
@@ -7,9 +7,9 @@ from app.parser import NullArray, NullBulkString
     arity=Arity(2, None),
     flags={"write", "lists"}
 )
-def cmd_rpush(ctx: CommandContext, args: list[bytes]) -> int:
+def cmd_rpush(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, *values = args
-    return ctx.app_state.storage.rpush(key, *values)
+    return IntegerType(ctx.app_state.storage.rpush(key, *values))
 
 
 @command(
@@ -17,9 +17,9 @@ def cmd_rpush(ctx: CommandContext, args: list[bytes]) -> int:
     arity=Arity(2, None),
     flags={"write", "lists"}
 )
-def cmd_lpush(ctx: CommandContext, args: list[bytes]) -> int:
+def cmd_lpush(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, *values = args
-    return ctx.app_state.storage.lpush(key, *values)
+    return IntegerType(ctx.app_state.storage.lpush(key, *values))
 
 
 @command(
@@ -27,9 +27,12 @@ def cmd_lpush(ctx: CommandContext, args: list[bytes]) -> int:
     arity=Arity(3, 3),
     flags={"readonly", "lists"}
 )
-def cmd_lrange(ctx: CommandContext, args: list[bytes]) -> list[bytes]:
+def cmd_lrange(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, start, end = args
-    return ctx.app_state.storage.lrange(key, int(start), int(end))
+    result = ctx.app_state.storage.lrange(key, int(start), int(end))
+    return ArrayType(
+        [BulkStringType(value) for value in result]
+    )
 
 
 @command(
@@ -37,9 +40,9 @@ def cmd_lrange(ctx: CommandContext, args: list[bytes]) -> list[bytes]:
     arity=Arity(1, 1),
     flags={"readonly", "lists"}
 )
-def cmd_llen(ctx: CommandContext, args: list[bytes]) -> int:
+def cmd_llen(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, = args
-    return ctx.app_state.storage.llen(key)
+    return IntegerType(ctx.app_state.storage.llen(key))
 
 
 @command(
@@ -47,17 +50,17 @@ def cmd_llen(ctx: CommandContext, args: list[bytes]) -> int:
     arity=Arity(1, 2),
     flags={"write", "lists"}
 )
-def cmd_lpop(ctx: CommandContext, args: list[bytes]) -> bytes | list[bytes] | NullBulkString:
+def cmd_lpop(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, *args = args
     count = int(args[0]) if args else None
     values = ctx.app_state.storage.lpop(key, count=count)
     if values is None:
-        return NullBulkString()
+        return NullBulkStringType()
     
     if count is None:
-        return values[0]
+        return BulkStringType(values[0])
     
-    return values
+    return ArrayType([BulkStringType(value) for value in values])
 
 
 @command(
@@ -66,13 +69,13 @@ def cmd_lpop(ctx: CommandContext, args: list[bytes]) -> bytes | list[bytes] | Nu
     flags={"write", "lists"}
 
 )
-async def cmd_blpop(ctx: CommandContext, args: list[bytes]) -> list[bytes] | NullArray:
+async def cmd_blpop(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     *keys, timeout = args
 
     result = await ctx.app_state.storage.blpop(*keys, timeout=float(timeout))
     if result is None:
-        return NullArray()
+        return NullArrayType()
     key, value = result
     key_payload = key if isinstance(key, bytes) else str(key).encode()
     val_payload = value if isinstance(value, bytes) else str(value).encode()
-    return [key_payload, val_payload]
+    return ArrayType([BulkStringType(key_payload), BulkStringType(val_payload)])

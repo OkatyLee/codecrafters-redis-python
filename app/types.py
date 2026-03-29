@@ -2,6 +2,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from time import time
+from tkinter import N
 from typing import Any, Callable
 
 from app.parser import RESPError
@@ -209,7 +210,7 @@ class StreamType(ValueType):
 
         stream = self._get_value(key)
         if not isinstance(stream, dict):
-            raise TypeError("Expected a dictionary value for stream key")
+            raise TypeError("ERR Expected a dictionary value for stream key")
 
         stream.setdefault("entries", [])
 
@@ -231,15 +232,12 @@ class StreamType(ValueType):
         stream["ID"] = resolved_id
         return resolved_id
     
-    def xrange(self, key: RedisKey, start: str | bytes, end: str | bytes) -> list[list[str | dict[bytes, bytes]]]:
+    def xrange(self, key: RedisKey, start: str | bytes, end: str | bytes) -> list[tuple[str, dict[bytes, bytes]]]:
         if isinstance(start, bytes):
             start = start.decode()
         if isinstance(end, bytes):
             end = end.decode()
-        if start == "-":
-            start = ''
-        if end == "+":
-            end = ''
+
         stream = self._get_value(key)
         if stream is None:
             return []
@@ -249,43 +247,45 @@ class StreamType(ValueType):
         entries = stream.get("entries", [])
         result = []
         for entry_id, entry in entries:
-            if entry_id < start and start != '':
+            if entry_id < start and start != '-':
                 continue
-            if entry_id > end and end != '':
+            if entry_id > end and end != '+':
                 break
-            result.append([entry_id, entry])
+            result.append((entry_id, entry))
         return result
     
     def xread_streams(
         self,
         keys: Sequence[RedisKey],
         ids: Sequence[str | bytes],
-    ) -> list[list[RedisKey | list[list[str | dict[bytes, bytes]]]]]:
+    ) -> list[tuple[RedisKey, list[tuple[str, dict[bytes, bytes]]]]]:
         if len(keys) != len(ids):
-            raise ValueError("Unbalanced XREAD stream keys and ids")
+            raise ValueError("ERR Unbalanced XREAD stream keys and ids")
 
-        result: list[list[Any]] = []
+        result = []
         for index, key in enumerate(keys):
             raw_stream_id = ids[index]
             stream_id = raw_stream_id.decode() if isinstance(raw_stream_id, bytes) else str(raw_stream_id)
+            stream_ts, stream_cntr = self._parse_id(stream_id)
             stream = self._get_value(key)
 
             if stream is None:
                 continue
             if not isinstance(stream, dict):
-                raise TypeError(f"Key {key} is not a stream")
+                raise TypeError(f"ERR Key {key} is not a stream")
 
             entries: list[StreamEntry] = stream.get("entries", [])
             if stream_id == "$":
                 stream_id = entries[-1][0] if entries else "0-0"
 
-            stream_entries: list[list[str | dict[bytes, bytes]]] = []
+            stream_entries: list[tuple[str, dict[bytes, bytes]]] = []
             for entry_id, entry in entries:
-                if entry_id > stream_id:
-                    stream_entries.append([entry_id, entry])
+                milliseconds, sequenceNum = self._parse_id(entry_id)
+                if milliseconds > stream_ts or (milliseconds == stream_ts and sequenceNum > stream_cntr):
+                    stream_entries.append((entry_id, entry))
 
             if stream_entries:
-                result.append([key, stream_entries])
+                result.append((key, stream_entries))
 
         return result
 
@@ -374,19 +374,19 @@ class SortedSetType(ValueType):
         if not isinstance(sorted_set, dict):
             raise TypeError(WRONGTYPE_ERROR)
         if abs(longitude) > self.MAX_LONGITUDE or abs(latitude) > self.MAX_LATITUDE:
-            raise ValueError(f"invalid longitude,latitude pair {longitude},{latitude}")
+            raise ValueError(f"ERR invalid longitude,latitude pair {longitude},{latitude}")
         is_exiting = member in sorted_set
         sorted_set[member] = self._encode_geoloc(longitude, latitude)
         self._set_value(key, sorted_set)
         return 1 if not is_exiting else 0
 
-    def geopos(self, key: RedisKey, members: list[bytes]) -> list[list[bytes] | None]:
+    def geopos(self, key: RedisKey, members: list[bytes]) -> list[tuple[bytes, bytes] | None]:
         sorted_set = self._get_value(key)
         if sorted_set is None:
             return [None for _ in members]
         if not isinstance(sorted_set, dict):
             raise TypeError(WRONGTYPE_ERROR)
-        scores = []
+        scores: list[int | None] = []
         for mem in members:
             raw_score = sorted_set.get(mem)
             if raw_score is None:
@@ -397,11 +397,14 @@ class SortedSetType(ValueType):
             except:
                 score = None
             scores.append(score)
-        return [
-            [str(pos).encode() for pos in self._decode_to_geoloc(score)] 
-            if score is not None else None
-            for score in scores
-        ]
+        lon_lat_list = []
+        for score in scores:
+            if score is None:
+                lon_lat_list.append(None)
+            else:
+                lon, lat = self._decode_to_geoloc(score)
+                lon_lat_list.append((str(lon).encode(), str(lat).encode()))
+        return lon_lat_list
 
     def geodist(self, key: RedisKey, member1: bytes, member2: bytes) -> float | None:
         sorted_set = self._get_value(key)
@@ -488,13 +491,13 @@ class SortedSetType(ValueType):
                 max_val = mid
         return bits
 
-    def _decode_to_geoloc(self, geo_code: int) -> list[float]:
+    def _decode_to_geoloc(self, geo_code: int) -> tuple[float, float]:
         bits_geocode = bin(geo_code)[2:].zfill(52)  # Convert to 52-bit binary string
         latitude_bits = bits_geocode[1::2]  
         longitude_bits = bits_geocode[::2] 
         latitude = self._deinterleave(latitude_bits, self.MIN_LATITUDE, self.MAX_LATITUDE)
         longitude = self._deinterleave(longitude_bits, self.MIN_LONGITUDE, self.MAX_LONGITUDE)
-        return [longitude, latitude]
+        return (longitude, latitude)
 
     def _deinterleave(self, bits: str, min_val: float, max_val: float) -> float:
         for bit in bits:

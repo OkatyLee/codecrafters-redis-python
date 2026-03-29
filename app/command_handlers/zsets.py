@@ -1,6 +1,7 @@
 
 from app.commands import Arity, CommandContext, command
-from app.parser import RESPError, NullArray, NullBulkString
+from app.parser import RESPError
+from app.resp_types import ArrayType, BaseRESPType, BulkStringType, IntegerType, NullArrayType, NullBulkStringType
 
 
 @command(
@@ -8,11 +9,11 @@ from app.parser import RESPError, NullArray, NullBulkString
     arity=Arity(3, 3),
     flags={"write", "zset"}
 )
-def cmd_zadd(ctx: CommandContext, args: list[bytes]) -> int:
+def cmd_zadd(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, score, member = args
 
     is_existing = ctx.app_state.storage.zadd(key, float(score), member)
-    return 1 if not is_existing else 0
+    return IntegerType(1 if not is_existing else 0)
 
 
 @command(
@@ -20,10 +21,10 @@ def cmd_zadd(ctx: CommandContext, args: list[bytes]) -> int:
     arity=Arity(2, 2),
     flags={"read", "zset"}
 )
-def cmd_zrank(ctx: CommandContext, args: list[bytes]) -> int | NullArray:
+def cmd_zrank(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, member = args
     rank = ctx.app_state.storage.zrank(key, member)
-    return rank if rank is not None else NullArray()
+    return IntegerType(rank) if rank is not None else NullArrayType()
 
 
 @command(
@@ -31,10 +32,10 @@ def cmd_zrank(ctx: CommandContext, args: list[bytes]) -> int | NullArray:
     arity=Arity(3, 3),
     flags={"read", "zset"}
 )
-def cmd_zrange(ctx: CommandContext, args: list[bytes]) -> list[bytes]:
+def cmd_zrange(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, start, end = args
     members = ctx.app_state.storage.zrange(key, int(start), int(end))
-    return members
+    return ArrayType([BulkStringType(member) for member in members])
 
 
 @command(
@@ -42,10 +43,10 @@ def cmd_zrange(ctx: CommandContext, args: list[bytes]) -> list[bytes]:
     arity=Arity(1, 1),
     flags={"read", "zset"}
 )
-def cmd_zcard(ctx: CommandContext, args: list[bytes]) -> int:
+def cmd_zcard(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key = args[0]
     count = ctx.app_state.storage.zcard(key)
-    return count
+    return IntegerType(count)
 
 
 @command(
@@ -53,10 +54,10 @@ def cmd_zcard(ctx: CommandContext, args: list[bytes]) -> int:
     arity=Arity(2, 2),
     flags={"read", "zset"}
 )
-def cmd_zscore(ctx: CommandContext, args: list[bytes]) -> bytes | NullBulkString:
+def cmd_zscore(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, member = args
     score = ctx.app_state.storage.zscore(key, member)
-    return str(score).encode() if score is not None else NullBulkString()
+    return BulkStringType(str(score).encode()) if score is not None else NullBulkStringType()
 
 
 @command(
@@ -64,10 +65,10 @@ def cmd_zscore(ctx: CommandContext, args: list[bytes]) -> bytes | NullBulkString
     arity=Arity(2, None),
     flags={"write", "zset"}
 )
-def cmd_zrem(ctx: CommandContext, args: list[bytes]) -> int:
+def cmd_zrem(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, members = args[0], args[1:]
     removed_count = ctx.app_state.storage.zrem(key, members)
-    return removed_count
+    return IntegerType(removed_count)
 
 
 @command(
@@ -76,10 +77,10 @@ def cmd_zrem(ctx: CommandContext, args: list[bytes]) -> int:
     flags={"write", "zset", "geospatial"}
 )
 
-def cmd_geoadd(ctx: CommandContext, args: list[bytes]) -> int:
+def cmd_geoadd(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, longitude, latitude, member = args
     num_added = ctx.app_state.storage.geoadd(key, float(longitude), float(latitude), member)
-    return num_added
+    return IntegerType(num_added)
 
 
 @command(
@@ -87,9 +88,14 @@ def cmd_geoadd(ctx: CommandContext, args: list[bytes]) -> int:
     arity=Arity(2, None),
     flags={"readonly", "zset", "geospatial"}
 )
-def cmd_geopos(ctx: CommandContext, args: list[bytes]) -> list[list[bytes] | None]:
+def cmd_geopos(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, members = args[0], args[1:]
     positions = ctx.app_state.storage.geopos(key, members)
+    positions = ArrayType([
+        ArrayType([BulkStringType(pos[0]), BulkStringType(pos[1])]) if pos is not None else NullArrayType()
+        for pos in positions
+
+    ])
     return positions
 
 
@@ -98,10 +104,10 @@ def cmd_geopos(ctx: CommandContext, args: list[bytes]) -> list[list[bytes] | Non
     arity=Arity(3, 3),
     flags={"readonly", "zset", "geospatial"}
 )
-def cmd_geodist(ctx: CommandContext, args: list[bytes]) -> bytes | NullBulkString:
+def cmd_geodist(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, member1, member2 = args
     distance = ctx.app_state.storage.geodist(key, member1, member2)
-    return str(distance).encode() if distance is not None else NullBulkString()
+    return BulkStringType(str(distance).encode()) if distance is not None else NullBulkStringType()
 
 
 @command(
@@ -109,15 +115,15 @@ def cmd_geodist(ctx: CommandContext, args: list[bytes]) -> bytes | NullBulkStrin
     arity=Arity(7, 7),
     flags={"readonly", "zset", "geospatial"}
 )
-def cmd_geosearch(ctx: CommandContext, args: list[bytes]) -> list[bytes]:
+def cmd_geosearch(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, *args = args
     search_mode = args[0]
     if search_mode.upper() != b'FROMLONLAT':
-        raise RESPError("only FROMLONLAT is supported")
+        raise RESPError("ERR only FROMLONLAT is supported")
     longitude, latitude = args[1], args[2]
     search_opt = args[3]
     if search_opt.upper() != b"BYRADIUS":
-        raise RESPError("only BYRADIUS is supported")
+        raise RESPError("ERR only BYRADIUS is supported")
     radius, unit = args[4], args[5]
     members = ctx.app_state.storage.geosearch(key, longitude, latitude, radius, unit)
-    return members
+    return ArrayType([BulkStringType(member) for member in members])

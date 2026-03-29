@@ -47,7 +47,7 @@ class CacheStorage:
         success.
         """
         if ttl is not None and ttl <= 0:
-            raise ValueError("-ERR invalid expire time in set")
+            raise ValueError("ERR invalid expire time in set")
         expire_at = None
         now = monotonic()
         if ttl is not None:
@@ -150,7 +150,7 @@ class CacheStorage:
         """
         return self._stream_type.xadd(key, stream_id, payload)
     
-    def xrange(self, key: RedisKey, start: str | bytes, end: str | bytes) -> list[list[str | dict[bytes, bytes]]]:
+    def xrange(self, key: RedisKey, start: str | bytes, end: str | bytes) -> list[tuple[str, dict[bytes, bytes]]]:
         """Return a range of entries from a stream.
 
         Returns a list of (entry_id, entry) tuples.
@@ -161,7 +161,7 @@ class CacheStorage:
         self,
         keys: Sequence[RedisKey],
         ids: Sequence[str | bytes],
-    ) -> list[list[RedisKey | list[list[str | dict[bytes, bytes]]]]]:
+    ) -> list[tuple[RedisKey, list[tuple[str, dict[bytes, bytes]]]]]:
         """Read entries from multiple streams.
 
         Returns a list of (entry_id, entry) tuples.
@@ -179,7 +179,7 @@ class CacheStorage:
         try:
             value = int(value)
         except (ValueError, TypeError):
-            raise TypeError("Value at key is not an integer")
+            raise TypeError("ERR Value at key is not an integer")
         value += 1
         self.set(key, str(value).encode())
         return value
@@ -298,7 +298,7 @@ class CacheStorage:
                     return struct.unpack('<H', data[p+1:p+3])[0], p + 3
                 elif special == 2:
                     return struct.unpack('<I', data[p+1:p+5])[0], p + 5
-                raise ValueError(f"Unsupported length special encoding: {special}")
+                raise ValueError(f"ERR Unsupported length special encoding: {special}")
 
         def decode_string(p: int) -> tuple[bytes, int]:
             first = data[p]
@@ -313,7 +313,7 @@ class CacheStorage:
                 elif special == 2:
                     val = struct.unpack('<I', data[p+1:p+5])[0]
                     return str(val).encode(), p + 5
-                raise ValueError(f"Unsupported string special encoding: {special}")
+                raise ValueError(f"ERR Unsupported string special encoding: {special}")
             length, p = decode_length(p)
             return data[p:p+length], p + length
 
@@ -391,7 +391,7 @@ class CacheStorage:
         """Add a member to a geospatial index."""
         return self._sset.geoadd(key, longitude, latitude, member)
     
-    def geopos(self, key: RedisKey, members: list[bytes]) -> list[list[bytes] | None]:
+    def geopos(self, key: RedisKey, members: list[bytes]) -> list[tuple[bytes, bytes] | None]:
         """Return the positions of members in the geospatial index at key."""
         return self._sset.geopos(key, members)
 

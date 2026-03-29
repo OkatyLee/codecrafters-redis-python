@@ -6,22 +6,9 @@ errors in the subset required by the exercises.
 """
 
 import asyncio
-from collections.abc import Sequence
-from dataclasses import dataclass
-
-
 
 type RESPPrimitive = bytes | str | int | None
 type RESPValue = RESPPrimitive | list["RESPValue"] | dict[bytes | str, "RESPValue"]
-
-
-class NullArray: pass
-class NullBulkString: pass
-
-
-@dataclass(slots=True)
-class RawResponse:
-    payload: bytes
 
 
 class RESPError(Exception):
@@ -79,7 +66,7 @@ class RESPParser:
             case b"-":
                 raise RESPError(payload.decode())
             case _:
-                raise ValueError(f"Unknown RESP prefix: {prefix!r}")
+                raise ValueError(f"ERR Unknown RESP prefix: {prefix!r}")
 
     async def _parse_array(self, count: int) -> list[RESPValue] | None:
         """Parse a RESP array consisting of *count* elements.
@@ -89,7 +76,7 @@ class RESPParser:
         if count == -1:
             return None
         if count < -1:
-            raise ValueError("Invalid array length")
+            raise ValueError("ERR Invalid array length")
         result = []
         for _ in range(count):
             result.append(await self.parse())
@@ -104,87 +91,11 @@ class RESPParser:
         if length == -1:
             return None
         if length < -1:
-            raise ValueError("Invalid array length")
+            raise ValueError("ERR Invalid bulk string length")
         try:
             data = await self.reader.readexactly(length + 2)  # +2 for \r\n
         except asyncio.IncompleteReadError as e:
-            raise ConnectionError("Connection closed mid-bulk-string") from e
+            raise ConnectionError("ERR Connection closed mid-bulk-string") from e
+        if data[-2:] != b"\r\n":
+            raise ConnectionError("ERR Invalid bulk string terminator")
         return data[:-2]
-    
-    def encode_bulk_string(self, value: bytes | None) -> bytes:
-        """Encode a bulk string value to RESP format.
-
-        Returns the RESP-encoded bytes for a bulk string value or null.
-        """
-        if value is None:
-            return b"$-1\r\n"
-        if isinstance(value, str):
-            value = value.encode()
-        return b"$" + str(len(value)).encode() + b"\r\n" + value + b"\r\n"
-    
-    def encode_simple_string(self, value: str) -> bytes:
-        """Encode a simple string value to RESP format.
-
-        Returns the RESP-encoded bytes for a simple string value.
-        """
-        return f"+{value}\r\n".encode()
-    
-    def encode_integer(self, value: int) -> bytes:
-        """Encode an integer value to RESP format.
-
-        Returns the RESP-encoded bytes for an integer value.
-        """
-        return f":{value}\r\n".encode()
-    
-    def encode_null(self) -> bytes:
-        """Encode a null value to RESP format.
-
-        Returns the RESP-encoded bytes for a null value.
-        """
-        return b"$-1\r\n"
-    
-    def encode_array(self, values: Sequence[object] | None) -> bytes:
-        """Encode an array of values to RESP format.
-
-        Returns the RESP-encoded bytes for an array of values.
-        """
-        if values is None:
-            return b"*-1\r\n"
-        result = b"*" + str(len(values)).encode() + b"\r\n"
-        for value in values:
-            if isinstance(value, RawResponse):
-                result += value.payload
-                continue
-            if isinstance(value, bytes):
-                result += self.encode_bulk_string(value)
-            elif isinstance(value, str):
-                result += self.encode_simple_string(value)
-            elif isinstance(value, int):
-                result += self.encode_integer(value)
-            elif isinstance(value, list):
-                result += self.encode_array(value)
-            elif isinstance(value, dict):
-                val = [item for k, v in value.items() for item in (k, v)]
-                result += self.encode_array(val)
-            elif value is None:
-                result += self.encode_null_array()
-            elif isinstance(value, NullArray):
-                result += self.encode_null_array()
-            elif isinstance(value, NullBulkString):
-                result += self.encode_null()
-            else:
-                raise TypeError(f"Unsupported value type: {type(value)}")
-        return result
-
-    def encode_null_array(self) -> bytes:
-        """Encode a null array value to RESP format."""
-        return b"*-1\r\n"
-    
-    def encode_simple_error(self, message: str) -> bytes:
-        """Encode a simple error message to RESP format.
-
-        Returns the RESP-encoded bytes for a simple error message.
-        """
-        if not message.startswith("ERR"):
-            message = f"ERR {message}"
-        return f"-{message}\r\n".encode()

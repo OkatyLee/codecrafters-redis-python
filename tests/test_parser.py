@@ -75,3 +75,11 @@ async def test_parser_incomplete_bulk_string_raises_connection_error():
 
     with pytest.raises(ConnectionError, match="Connection closed mid-bulk-string"):
         await parser.parse()
+
+
+@pytest.mark.asyncio
+async def test_parser_invalid_bulk_string_terminator_raises_connection_error():
+    parser = RESPParser(make_reader(b"$3\r\nabcXX"))
+
+    with pytest.raises(ConnectionError, match="Invalid bulk string terminator"):
+        await parser.parse()
