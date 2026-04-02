@@ -3,6 +3,7 @@ from collections.abc import Sequence
 import time
 from app.command_executor import build_exec_ctx
 from app.metrics import client_connected, client_disconnected, record_command, record_protocol_error, set_active_subscriptions
+from app.pubsub_client import unsubscribe_client_everywhere
 from app.resp_types import SimpleErrorType
 from app.session import ClientSession
 from app.dispatcher import dispatch_command
@@ -58,17 +59,25 @@ async def handle_client(
                 status="error" if payload.startswith(b"-") else "ok",
                 duration_seconds=time.perf_counter() - started_at,
             )
-            writer.write(payload)
-            await writer.drain()
+            sub = session.subscriber_client
+            if sub is not None and payload:
+                await sub.queue.put(payload)
+            elif payload:
+                writer.write(payload)
+                await writer.drain()
     except Exception as e:
         app_state.logger.error(f"Error handling client: {e}")
     finally:
         if app_state.config is not None:
             if writer in app_state.replica_writers:
                 app_state.unregister_replica(writer)
-            for ch in session.subscribed_channels:
-                app_state.pubsub[ch].discard(writer)
-            set_active_subscriptions(sum(len(subscribers) for subscribers in app_state.pubsub.values()))
+            sub = session.subscriber_client
+            if sub is not None:
+                await unsubscribe_client_everywhere(sub, app_state)
+
         client_disconnected()
         writer.close()
-        await writer.wait_closed()
+        try:
+            await writer.wait_closed()
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            pass

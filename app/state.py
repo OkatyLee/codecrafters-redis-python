@@ -1,13 +1,18 @@
 
+from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
 import logging
+from typing import TYPE_CHECKING
 
 from app.config import PubSubConfig, ServerConfig
 from app.metrics import set_connected_replicas
 from app.storage import CacheStorage
+
+if TYPE_CHECKING:
+    from app.pubsub_client import SubscriberClient
 
 
 @dataclass(slots=True)
@@ -33,7 +38,7 @@ class AppState:
     replica_writers: list[asyncio.StreamWriter] = field(default_factory=list)
     replicas_ports: list[int] = field(default_factory=list)
     replica_ack_offsets: dict[asyncio.StreamWriter, int] = field(default_factory=dict)
-    pubsub: dict[bytes, set[asyncio.StreamWriter]] = field(default_factory=lambda: defaultdict(set))
+    pubsub: dict[bytes, set[SubscriberClient]] = field(default_factory=lambda: defaultdict(set))
     bgsave_task: asyncio.Future | None = None
     
     

@@ -2,9 +2,12 @@
 import asyncio
 
 from app.commands import Arity, CommandContext, command
-from app.config import PubSubConfig
 from app.metrics import set_active_subscriptions
 from app.parser import RESPError
+from app.pubsub_client import (
+    SubscriberClient,
+    unsubscribe_client_everywhere,
+)
 from app.resp_types import (
     ArrayType,
     BaseRESPType,
@@ -13,7 +16,13 @@ from app.resp_types import (
     NullBulkStringType,
     RawResponse,
 )
-from app import metrics
+
+
+def _schedule_subscriber_cleanup(sub: SubscriberClient, ctx: CommandContext) -> None:
+    if getattr(sub, "_cleanup_scheduled", False):
+        return
+    sub._cleanup_scheduled = True
+    asyncio.create_task(unsubscribe_client_everywhere(sub, ctx.app_state))
 
 def _subscription_reply(kind: bytes, channel: bytes | None, count: int) -> bytes:
     elements: list[BaseRESPType] = [BulkStringType(kind)]
@@ -31,24 +40,29 @@ def _subscription_reply(kind: bytes, channel: bytes | None, count: int) -> bytes
     flags={"pubsub"},
     allowed_in_subscribe=True
 )
-def cmd_subscribe(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
+async def cmd_subscribe(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     writer = ctx.exec_ctx.connection_writer
     if writer is None:
         raise RESPError("ERR write error")
-    
+    sub = ctx.session.subscriber_client
+    if sub is None:
+        sub = SubscriberClient(writer, maxsize=ctx.app_state.pubsub_config.queue_maxsize)
+        await sub.start_sender()
+        ctx.session.subscriber_client = sub
     payload = b""
     for channel in args:
         ch = channel if isinstance(channel, bytes) else str(channel).encode()
-        ctx.app_state.pubsub[ch].add(writer)
-        ctx.session.subscribed_channels.add(ch)
+        ctx.app_state.pubsub[ch].add(sub)
+        sub.subscribed_channels.add(ch)
         payload += _subscription_reply(
             b"subscribe",
             ch,
-            len(ctx.session.subscribed_channels),
+            len(sub.subscribed_channels),
         )
     set_active_subscriptions(sum(len(subscribers) for subscribers in ctx.app_state.pubsub.values()))
     ctx.session.in_subscribed_mode = True
-    return RawResponse(payload)
+    await sub.queue.put(payload)
+    return RawResponse(b"")
 
 
 @command(
@@ -58,25 +72,30 @@ def cmd_subscribe(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     allowed_in_subscribe=True
 )
 def cmd_unsubscribe(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
-    targets = (
-        args if args else list(ctx.session.subscribed_channels)
-    )
-    
     writer = ctx.exec_ctx.connection_writer
     if writer is None:
         raise RESPError("ERR write error")
+
+    sub = ctx.session.subscriber_client
+
+    if sub is None or not sub.subscribed_channels:
+        return RawResponse(_subscription_reply(b"unsubscribe", None, 0))
+    targets = args if args else list(sub.subscribed_channels)
     
     payload = b""
     for ch in targets:
-        ctx.session.subscribed_channels.discard(ch)
-        ctx.app_state.pubsub[ch].discard(writer)
+        sub.subscribed_channels.discard(ch)
+        ctx.app_state.pubsub[ch].discard(sub)
+        if not ctx.app_state.pubsub[ch]:
+            ctx.app_state.pubsub.pop(ch, None)
         payload += _subscription_reply(
             b"unsubscribe",
             ch,
-            len(ctx.session.subscribed_channels),
+            len(sub.subscribed_channels),
         )
     set_active_subscriptions(sum(len(subscribers) for subscribers in ctx.app_state.pubsub.values()))
-    if not ctx.session.subscribed_channels:
+    
+    if not sub.subscribed_channels:
         ctx.session.in_subscribed_mode = False
     raw_response = payload if payload else _subscription_reply(b"unsubscribe", None, 0)
     return RawResponse(raw_response)
@@ -85,54 +104,26 @@ def cmd_unsubscribe(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
 @command(
     name=b"PUBLISH",
     arity=Arity(2, 2),
-    flags={"readonly", "coroutine", "pubsub"}
+    flags={"pubsub"}
 )
-async def cmd_publish(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
+def cmd_publish(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     channel, message = args[0], args[1]
     subscribers = ctx.app_state.pubsub.get(channel, set())
     if not subscribers:
         return IntegerType(0)
     cfg = ctx.app_state.pubsub_config
     payload = ArrayType([BulkStringType(val) for val in [b"message", channel, message]]).encode()
-    active = []
-    for sw in list(subscribers):  
-        if sw.is_closing():
-            _evict_writer(sw, ctx.app_state.pubsub)
-        elif sw.transport.get_write_buffer_size() >= cfg.max_write_buffer_bytes:
+    delivered = 0
+    for sub in list(subscribers):  
+        if sub.writer.is_closing():
+            _schedule_subscriber_cleanup(sub, ctx)
+            continue
+        try:
+            sub.queue.put_nowait(payload)
+            delivered += 1
+        except asyncio.QueueFull:
             if cfg.slow_subscriber_policy == "disconnect":
-                _evict_writer(sw, ctx.app_state.pubsub)
-        else:
-            sw.write(payload)
-            active.append(sw)
-    
-    if active:
-        async with asyncio.TaskGroup() as tg:
-            for sw in active:
-                tg.create_task(_drain(sw, ctx.app_state.pubsub, cfg))
+                _schedule_subscriber_cleanup(sub, ctx)
 
-    return IntegerType(len(active))
+    return IntegerType(delivered)
 
-
-def _evict_writer(writer: asyncio.StreamWriter, pubsub: dict):
-    """Unsub writer from all channels. Returns num of unsubed channels"""
-    writer.close()
-    removed = 0
-    for channel, writers in list(pubsub.items()):
-        if writer in writers:
-            removed += 1
-            writers.discard(writer)
-        if not writers:
-            pubsub.pop(channel, None)
-    if removed:
-        total = sum(len(w) for w in pubsub.values())
-        metrics.set_active_subscriptions(total)
-    return removed
-        
-
-async def _drain(sub_writer: asyncio.StreamWriter, pubsub: dict, cfg: PubSubConfig):
-    try:
-        async with asyncio.timeout(cfg.drain_timeout_seconds):
-            await sub_writer.drain()
-    except (TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
-        if cfg.slow_subscriber_policy == "disconnect":
-            _evict_writer(sub_writer, pubsub)

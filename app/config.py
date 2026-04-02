@@ -6,9 +6,8 @@ from app.session import ACLUser
 
 @dataclass(slots=True)
 class PubSubConfig:
-    max_write_buffer_bytes: int = 64 * 1024   # 64 KB
-    drain_timeout_seconds: float = 1.0
     slow_subscriber_policy: str = "disconnect"  # "disconnect" | "skip"
+    queue_maxsize: int = 1000
 
 class ServerConfig:
     def __init__(self, host: str, port: int, replicaof: str | None = None, dir: str = "tmp/files", dbfilename: str = "dump.rdb"):

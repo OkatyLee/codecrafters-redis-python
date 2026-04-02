@@ -1,7 +1,12 @@
 
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from hashlib import sha256
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.pubsub_client import SubscriberClient
 
 
 @dataclass(slots=True)
@@ -46,7 +51,7 @@ class ClientSession:
     in_multi: bool = False
     queued_commands: list[list[bytes]] = field(default_factory=list)
     in_subscribed_mode: bool = False
-    subscribed_channels: set[bytes] = field(default_factory=set)
+    subscriber_client: SubscriberClient | None  = None
     
     @property
     def is_authenticated(self) -> bool:
