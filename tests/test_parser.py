@@ -22,6 +22,20 @@ async def test_parser_array():
 
 
 @pytest.mark.asyncio
+async def test_parser_inline_command():
+    parser = RESPParser(make_reader(b"PING\r\n"))
+
+    assert await parser.parse() == [b"PING"]
+
+
+@pytest.mark.asyncio
+async def test_parser_inline_command_with_quotes_and_escape():
+    parser = RESPParser(make_reader(b'SET key "hello world" escaped\\ value\r\n'))
+
+    assert await parser.parse() == [b"SET", b"key", b"hello world", b"escaped value"]
+
+
+@pytest.mark.asyncio
 async def test_parser_integer():
     parser = RESPParser(make_reader(b":123\r\n"))
 

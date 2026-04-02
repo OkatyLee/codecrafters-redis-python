@@ -61,10 +61,17 @@ async def test_main_starts_server_and_serves_forever(monkeypatch):
 
     monkeypatch.setattr(
         "app.main.parse_args",
-        lambda: argparse.Namespace(host="localhost", port=6379, replicaof=None, dir="./test_path", dbfilename="test_file"),
+        lambda: argparse.Namespace(
+            host="localhost",
+            port=6379,
+            replicaof=None,
+            dir="./test_path",
+            dbfilename="test_file",
+            metrics_port=0,
+        ),
     )
 
-    async def fake_start_server(callback, host, port):
+    async def fake_start_server(callback, host, port, **kwargs):
         nonlocal captured_callback
         captured_callback = callback
         assert host == "localhost"
@@ -225,6 +232,7 @@ def test_parse_args_defaults(monkeypatch):
     assert args.host == "127.0.0.1"
     assert args.replicaof is None
     assert args.dbfilename == "dump.rdb"
+    assert args.metrics_port == 9100
 
 
 def test_parse_args_custom_values(monkeypatch):
@@ -235,6 +243,7 @@ def test_parse_args_custom_values(monkeypatch):
         "--replicaof", "127.0.0.1:6379",
         "--dir", "/tmp/redis",
         "--dbfilename", "mydb.rdb",
+        "--metrics-port", "9200",
     ])
     from app.main import parse_args
     args = parse_args()
@@ -243,6 +252,7 @@ def test_parse_args_custom_values(monkeypatch):
     assert args.replicaof == "127.0.0.1:6379"
     assert args.dir == "/tmp/redis"
     assert args.dbfilename == "mydb.rdb"
+    assert args.metrics_port == 9200
 
 
 def test_parse_args_short_port_flag(monkeypatch):
@@ -268,7 +278,7 @@ async def test_main_loads_rdb_on_startup(monkeypatch):
             "app.main.parse_args",
             lambda: argparse.Namespace(
                 host="127.0.0.1", port=6379, replicaof=None,
-                dir=tmpdir, dbfilename="startup.rdb",
+                dir=tmpdir, dbfilename="startup.rdb", metrics_port=0,
             ),
         )
         monkeypatch.setattr("app.main.asyncio.start_server", AsyncMock(return_value=server))
@@ -288,7 +298,7 @@ async def test_main_missing_rdb_does_not_crash(monkeypatch):
             "app.main.parse_args",
             lambda: argparse.Namespace(
                 host="127.0.0.1", port=6379, replicaof=None,
-                dir=tmpdir, dbfilename="missing.rdb",
+                dir=tmpdir, dbfilename="missing.rdb", metrics_port=0,
             ),
         )
         monkeypatch.setattr("app.main.asyncio.start_server", AsyncMock(return_value=server))
@@ -302,13 +312,38 @@ async def test_main_invalid_replicaof_format_returns_early(monkeypatch, caplog):
         "app.main.parse_args",
         lambda: argparse.Namespace(
             host="127.0.0.1", port=6380, replicaof="bad-format",
-            dir="./data", dbfilename="dump.rdb",
+            dir="./data", dbfilename="dump.rdb", metrics_port=0,
         ),
     )
 
     await main()
 
     assert "Error: --replicaof must be in the format host:port" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_main_starts_metrics_server_when_enabled(monkeypatch):
+    server = _ServerStub()
+    metrics_calls: list[int] = []
+
+    monkeypatch.setattr(
+        "app.main.parse_args",
+        lambda: argparse.Namespace(
+            host="127.0.0.1",
+            port=6379,
+            replicaof=None,
+            dir="./test_path",
+            dbfilename="test_file",
+            metrics_port=9100,
+        ),
+    )
+    monkeypatch.setattr("app.main.start_metrics_server", lambda port: metrics_calls.append(port))
+    monkeypatch.setattr("app.main.asyncio.start_server", AsyncMock(return_value=server))
+
+    await main()
+
+    assert metrics_calls == [9100]
+    server.serve_forever.assert_awaited_once()
 
 
 # ---------- replication_handshake_and_loop error-path tests ----------

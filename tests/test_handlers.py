@@ -694,6 +694,22 @@ async def test_xrange_compares_stream_ids_numerically():
 
 
 @pytest.mark.asyncio
+async def test_handle_client_inline_ping():
+    server, app_state = await start_test_server()
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+    response = await send_command_and_read_response(reader, writer, b"PING\r\n")
+
+    assert response == b"+PONG\r\n"
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_xread_compares_stream_ids_numerically():
     server, app_state = await start_test_server()
     addr = server.sockets[0].getsockname()

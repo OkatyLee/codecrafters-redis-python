@@ -1,9 +1,12 @@
 import argparse
 import asyncio
 import logging
+import signal
+import sys
 
-from app.config import ServerConfig
+from app.config import PubSubConfig, ServerConfig
 from app.handlers import handle_client
+from app.metrics import start_metrics_server
 from app.persistence import load_from_disk
 from app.replication import replication_handshake_and_loop
 from app.state import AppState
@@ -42,6 +45,14 @@ def parse_args() -> argparse.Namespace:
         default="dump.rdb",
         help="Filename to store database dump",
     )
+    parser.add_argument(
+        "--metrics-port",
+        type=int,
+        default=9100,
+        metavar="PORT",
+        help="Port for Prometheus metrics server (0 to disable)",
+    )
+
 
     return parser.parse_args()
 
@@ -49,10 +60,20 @@ def parse_args() -> argparse.Namespace:
 async def main() -> None:
     """Start server and, if needed, establish replica handshake."""
     args = parse_args()
-    config = ServerConfig(args.host, args.port, args.replicaof, args.dir, args.dbfilename)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
     logger = logging.getLogger(__name__)
+    if args.metrics_port:
+        start_metrics_server(args.metrics_port)
+    else:
+        logger.info("Metrics server disabled")
+
+    config = ServerConfig(args.host, args.port, args.replicaof, args.dir, args.dbfilename)
     storage = CacheStorage()
-    app_state = AppState(config, storage, logger)
+    pubsub_config = PubSubConfig()
+    app_state = AppState(config, storage, logger, pubsub_config)
     # Load persisted data from RDB file if it exists
     load_from_disk(app_state)
 
@@ -78,10 +99,15 @@ async def main() -> None:
     async def handle_client_wrapper(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await handle_client(reader, writer, app_state)
 
-    server = await asyncio.start_server(handle_client_wrapper, args.host, args.port)
+    server = await asyncio.start_server(handle_client_wrapper, args.host, args.port, reuse_port=True)
     addr = server.sockets[0].getsockname()
     app_state.logger.info(f"Server started on {addr}")
 
+    if sys.platform != "win32":
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, server.close)
+            
     async with server:
         await server.serve_forever()
 

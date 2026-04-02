@@ -10,6 +10,8 @@ import asyncio
 type RESPPrimitive = bytes | str | int | None
 type RESPValue = RESPPrimitive | list["RESPValue"] | dict[bytes | str, "RESPValue"]
 
+RESP_PREFIXES = {b"*", b"$", b":", b"+", b"-"}
+
 
 class RESPError(Exception):
     """Exception raised when a RESP error reply (prefix ``-``) is parsed.
@@ -52,6 +54,7 @@ class RESPParser:
             return None
         if not data.endswith(b"\r\n"):
             raise ConnectionError("Incomplete RESP packet received (missing CRLF)")
+
         prefix = data[:1]
         payload = data[1:-2]
         match prefix:
@@ -66,6 +69,9 @@ class RESPParser:
             case b"-":
                 raise RESPError(payload.decode())
             case _:
+                inline_payload = data[:-2]
+                if self._looks_like_inline_command(inline_payload):
+                    return self._parse_inline_command(inline_payload)
                 raise ValueError(f"ERR Unknown RESP prefix: {prefix!r}")
 
     async def _parse_array(self, count: int) -> list[RESPValue] | None:
@@ -99,3 +105,62 @@ class RESPParser:
         if data[-2:] != b"\r\n":
             raise ConnectionError("ERR Invalid bulk string terminator")
         return data[:-2]
+
+    @staticmethod
+    def _looks_like_inline_command(line: bytes) -> bool:
+        stripped = line.lstrip(b" \t")
+        if not stripped:
+            return True
+        first = stripped[:1]
+        return first not in RESP_PREFIXES and chr(first[0]).isalpha()
+
+    @staticmethod
+    def _parse_inline_command(line: bytes) -> list[bytes]:
+        tokens: list[bytes] = []
+        current = bytearray()
+        quote_char: int | None = None
+        escaped = False
+        token_started = False
+
+        for byte in line:
+            if escaped:
+                current.append(byte)
+                escaped = False
+                token_started = True
+                continue
+
+            if byte == ord("\\"):
+                escaped = True
+                token_started = True
+                continue
+
+            if quote_char is not None:
+                if byte == quote_char:
+                    quote_char = None
+                else:
+                    current.append(byte)
+                token_started = True
+                continue
+
+            if byte in (ord('"'), ord("'")):
+                quote_char = byte
+                token_started = True
+                continue
+
+            if byte in (ord(" "), ord("\t")):
+                if token_started:
+                    tokens.append(bytes(current))
+                    current.clear()
+                    token_started = False
+                continue
+
+            current.append(byte)
+            token_started = True
+
+        if quote_char is not None:
+            raise ValueError("ERR Unterminated inline command")
+        if escaped:
+            raise ValueError("ERR Trailing escape in inline command")
+        if token_started:
+            tokens.append(bytes(current))
+        return tokens

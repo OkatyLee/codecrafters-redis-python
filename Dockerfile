@@ -8,6 +8,8 @@ WORKDIR /app
 COPY app ./app
 COPY pyproject.toml ./
 
+RUN pip install --no-cache-dir .
+
 RUN mkdir -p /data
 
 EXPOSE 6379

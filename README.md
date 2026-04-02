@@ -33,6 +33,7 @@ Available runtime flags:
 - `--replicaof` - start as a replica of `host:port`
 - `--dir` - directory used for persisted files
 - `--dbfilename` - RDB filename inside the data directory
+- `--metrics-port` - port for the Prometheus `/metrics` endpoint, use `0` to disable
 
 ## Run Tests
 
@@ -71,6 +72,88 @@ Run with custom arguments:
 ```sh
 docker run --rm -p 6380:6380 codecrafters-redis-python --port 6380 --host 0.0.0.0
 ```
+
+Inspect metrics locally:
+
+```sh
+curl http://127.0.0.1:9100/metrics
+```
+
+## Observability
+
+Bring up the Redis clone, Prometheus, and Grafana together:
+
+```sh
+docker compose -f docker-compose.observability.yml up -d
+```
+
+Endpoints:
+
+- Redis: `127.0.0.1:6379`
+- Replica when started for replication tests: `127.0.0.1:6380`
+- Metrics: `http://127.0.0.1:9100/metrics`
+- Replica metrics when started: `http://127.0.0.1:9101/metrics`
+- Prometheus: `http://127.0.0.1:9090`
+- Grafana: `http://127.0.0.1:3000` with `admin` / `admin`
+
+Grafana is pre-provisioned with:
+
+- a Prometheus datasource
+- a `Redis Clone Overview` dashboard
+
+Stop the stack with:
+
+```sh
+docker compose -f docker-compose.observability.yml down
+```
+
+## Load Testing
+
+Quick perf run with the observability stack already wired in:
+
+```sh
+./scripts/perf/run-benchmark.sh smoke
+```
+
+PowerShell:
+
+```powershell
+./scripts/perf/run-benchmark.ps1 -Scenario smoke
+```
+
+Available scenarios:
+
+- `smoke` - short mixed run for a quick sanity check
+- `read-heavy` - favors `PING`, `GET`, and `MGET`
+- `write-heavy` - favors `SET`, `INCR`, `LPUSH`, and `RPUSH`
+- `replication` - writes to the master and measures visibility on a replica
+- `pubsub` - fans out `PUBLISH` traffic to many subscribers and measures delivery latency
+
+You can also override runtime parameters:
+
+```powershell
+./scripts/perf/run-benchmark.ps1 -Scenario write-heavy -Clients 150 -Requests 80000 -DataSize 256
+```
+
+Replication example:
+
+```powershell
+./scripts/perf/run-benchmark.ps1 -Scenario replication -Clients 24 -Requests 1200 -DataSize 128
+```
+
+Pub/Sub example:
+
+```powershell
+./scripts/perf/run-benchmark.ps1 -Scenario pubsub -Clients 32 -Publishers 6 -Requests 1500 -DataSize 96
+```
+
+The scripts:
+
+- ensure `app`, `prometheus`, and `grafana` are running
+- start `app-replica` automatically for the replication scenario
+- execute `redis-benchmark` from an isolated Docker container on the same Compose network
+- execute dedicated Python perf drivers for replication and pub/sub scenarios
+- let you inspect throughput and latency live in Grafana while the benchmark is running
 
 ## Project Structure
 

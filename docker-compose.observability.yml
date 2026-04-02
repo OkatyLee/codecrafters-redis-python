@@ -1,0 +1,103 @@
+services:
+  app:
+    build:
+      context: .
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "6379"
+      - --dir
+      - /data
+      - --metrics-port
+      - "9100"
+    ports:
+      - "6379:6379"
+      - "9100:9100"
+    volumes:
+      - ./tmp/files:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import socket; s = socket.create_connection(("127.0.0.1", 6379), timeout=2); s.close()
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  app-replica:
+    build:
+      context: .
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "6380"
+      - --dir
+      - /data-replica
+      - --replicaof
+      - app:6379
+      - --metrics-port
+      - "9101"
+    ports:
+      - "6380:6380"
+      - "9101:9101"
+    volumes:
+      - ./tmp/files-replica:/data-replica
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import socket; s = socket.create_connection(("127.0.0.1", 6380), timeout=2); s.close()
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  prometheus:
+    image: prom/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      app:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+
+  benchmark:
+    image: redis:7-alpine
+    profiles:
+      - perf
+    entrypoint:
+      - redis-benchmark
+
+volumes:
+  prometheus-data:
+  grafana-data:

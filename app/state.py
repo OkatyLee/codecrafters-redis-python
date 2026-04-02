@@ -5,11 +5,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 import logging
 
-from app.config import ServerConfig
+from app.config import PubSubConfig, ServerConfig
+from app.metrics import set_connected_replicas
 from app.storage import CacheStorage
 
 
-@dataclass
+@dataclass(slots=True)
 class AppState:
     """
     Application state manager for a Redis-like server.
@@ -28,6 +29,7 @@ class AppState:
     config: ServerConfig
     storage: CacheStorage
     logger: logging.Logger
+    pubsub_config: PubSubConfig = field(default_factory=PubSubConfig)
     replica_writers: list[asyncio.StreamWriter] = field(default_factory=list)
     replicas_ports: list[int] = field(default_factory=list)
     replica_ack_offsets: dict[asyncio.StreamWriter, int] = field(default_factory=dict)
@@ -41,11 +43,13 @@ class AppState:
             self.replicas_ports.append(port)
         if writer is not None and writer not in self.replica_writers:
             self.replica_writers.append(writer)
+        set_connected_replicas(len(self.replica_writers))
             
     def unregister_replica(self, writer: asyncio.StreamWriter) -> None:
         if writer in self.replica_writers:
             self.replica_writers.remove(writer)
         self.replica_ack_offsets.pop(writer, None)
+        set_connected_replicas(len(self.replica_writers))
         
     def get_replicas(self) -> list[asyncio.StreamWriter]:
         return self.replica_writers
