@@ -124,7 +124,9 @@ async def replication_handshake_and_loop(
                 continue
 
             command = _normalize_command(data) # type: ignore
-            app_state.config.increment_replica_repl_offset(len(encode_command_as_resp_array(command)))
+            is_getack = command[:2] == [b"REPLCONF", b"GETACK"]
+            if not is_getack:
+                app_state.config.increment_replica_repl_offset(len(encode_command_as_resp_array(command)))
             exec_ctx = build_exec_ctx(
                 command,
                 app_state,
@@ -138,7 +140,7 @@ async def replication_handshake_and_loop(
                 replication_session,
                 exec_ctx,
             )
-            if command[:2] == [b"REPLCONF", b"GETACK"]:
+            if is_getack:
                 writer.write(response.encode())
                 await writer.drain()
     except Exception as exc:

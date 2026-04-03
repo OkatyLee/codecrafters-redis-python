@@ -1031,7 +1031,7 @@ async def test_incr_command_with_non_integer_value():
         writer,
         b"*2\r\n$4\r\nINCR\r\n$3\r\nkey\r\n",
     )
-    assert response == b"-ERR Value at key is not an integer\r\n"
+    assert response == b"-ERR value is not an integer or out of range\r\n"
     writer.close()
     await writer.wait_closed()
     server.close()

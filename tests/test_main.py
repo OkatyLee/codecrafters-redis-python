@@ -222,6 +222,70 @@ async def test_slave_write_is_not_propagated_back_to_master():
     await master_server.wait_closed()
 
 
+@pytest.mark.asyncio
+async def test_replica_reports_zero_offset_for_initial_getack():
+    handshake_seen = asyncio.Event()
+    ack_received = asyncio.Event()
+    stop_master = asyncio.Event()
+
+    async def fake_master(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        parser = RESPParser(reader)
+
+        assert await parser.parse() == [b"PING"]
+        writer.write(b"+PONG\r\n")
+        await writer.drain()
+
+        listening_port = await parser.parse()
+        assert listening_port is not None
+        assert isinstance(listening_port, list)
+        assert listening_port[:2] == [b"REPLCONF", b"listening-port"]
+        writer.write(b"+OK\r\n")
+        await writer.drain()
+
+        assert await parser.parse() == [b"REPLCONF", b"capa", b"psync2"]
+        writer.write(b"+OK\r\n")
+        await writer.drain()
+
+        assert await parser.parse() == [b"PSYNC", b"?", b"-1"]
+        writer.write(b"+FULLRESYNC test-replid 0\r\n$0\r\n")
+        await writer.drain()
+
+        handshake_seen.set()
+
+        writer.write(encode_command_as_resp_array([b"REPLCONF", b"GETACK", b"*"]))
+        await writer.drain()
+
+        ack = await asyncio.wait_for(parser.parse(), timeout=1)
+        assert ack == [b"REPLCONF", b"ACK", b"0"]
+        ack_received.set()
+
+        await stop_master.wait()
+        writer.close()
+        await writer.wait_closed()
+
+    master_server = await asyncio.start_server(fake_master, "127.0.0.1", 0)
+    master_addr = master_server.sockets[0].getsockname()
+
+    config = ServerConfig("127.0.0.1", 6380, f"127.0.0.1:{master_addr[1]}")
+    app_state = make_app_state(config)
+    master_reader, master_writer = await asyncio.open_connection(*master_addr)
+
+    replication_task = asyncio.create_task(
+        replication_handshake_and_loop(master_reader, master_writer, app_state, 6380)
+    )
+
+    await asyncio.wait_for(handshake_seen.wait(), timeout=1)
+    await asyncio.wait_for(ack_received.wait(), timeout=1)
+
+    stop_master.set()
+    await replication_task
+    master_server.close()
+    await master_server.wait_closed()
+
+
 # ---------- parse_args tests ----------
 
 def test_parse_args_defaults(monkeypatch):
@@ -555,9 +619,7 @@ async def test_replica_replies_with_ack_on_getack():
         await writer.drain()
 
         ack = await asyncio.wait_for(parser.parse(), timeout=1)
-        expected_offset = len(encode_command_as_resp_array(set_cmd)) + len(
-            encode_command_as_resp_array(getack_cmd)
-        )
+        expected_offset = len(encode_command_as_resp_array(set_cmd))
         assert ack == [b"REPLCONF", b"ACK", str(expected_offset).encode()]
         ack_received.set()
 
