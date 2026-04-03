@@ -223,7 +223,7 @@ async def test_regular_command_blocked_in_subscribe_mode():
         )
 
         assert subscribe_response == [b"subscribe", b"ch1", 1]
-        assert blocked_response == b"-ERR Command not allowed in subscribe mode\r\n"
+        assert blocked_response == b"ERR Can't execute 'echo': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n"
     finally:
         writer.close()
         await writer.wait_closed()

@@ -24,7 +24,7 @@ def cmd_zadd(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
 def cmd_zrank(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     key, member = args
     rank = ctx.app_state.storage.zrank(key, member)
-    return IntegerType(rank) if rank is not None else NullArrayType()
+    return IntegerType(rank) if rank is not None else NullBulkStringType()
 
 
 @command(
