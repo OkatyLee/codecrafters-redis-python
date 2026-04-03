@@ -179,7 +179,7 @@ class CacheStorage:
         try:
             value = int(value)
         except (ValueError, TypeError):
-            raise TypeError("ERR Value at key is not an integer")
+            raise TypeError("ERR value is not an integer or out of range")
         value += 1
         self.set(key, str(value).encode())
         return value
