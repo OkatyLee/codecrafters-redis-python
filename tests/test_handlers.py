@@ -513,8 +513,8 @@ async def test_xadd_handler_explicit_and_bytes_id():
         b"*5\r\n$4\r\nXADD\r\n$6\r\nstream\r\n$3\r\n1-2\r\n$1\r\ng\r\n$1\r\nw\r\n",
     )
 
-    assert explicit_resp == b"+1-1\r\n"
-    assert bytes_id_resp == b"+1-2\r\n"
+    assert explicit_resp == b"$3\r\n1-1\r\n"
+    assert bytes_id_resp == b"$3\r\n1-2\r\n"
 
     writer.close()
     await writer.wait_closed()
@@ -764,8 +764,7 @@ async def test_xread_block_streams_unblocks_on_new_entry():
         )
 
     xread_response, xadd_response = await asyncio.gather(do_xread_block(), do_xadd_later())
-    print(xread_response)
-    assert xadd_response.startswith(b"+")
+    assert xadd_response.startswith(b"$")
     assert isinstance(xread_response, list)
     assert len(xread_response) > 0
 
@@ -845,7 +844,7 @@ async def test_xread_block_zero_streams_waits_until_new_entry():
         timeout=2.0,
     )
 
-    assert xadd_response.startswith(b"+")
+    assert xadd_response.startswith(b"$")
     assert isinstance(xread_response, list)
     assert len(xread_response) > 0
 
@@ -1228,7 +1227,7 @@ async def _read_replica_command(reader: asyncio.StreamReader) -> list[bytes]:
         pytest.param((), [b"LPUSH", b"mylist", b"hello"], b":1\r\n", [b"LPUSH", b"mylist", b"hello"], id="lpush"),
         pytest.param((), [b"RPUSH", b"mylist", b"a", b"b"], b":2\r\n", [b"RPUSH", b"mylist", b"a", b"b"], id="rpush"),
         pytest.param(([b"RPUSH", b"mylist", b"a", b"b"],), [b"LPOP", b"mylist"], b"$1\r\na\r\n", [b"LPOP", b"mylist"], id="lpop"),
-        pytest.param((), [b"XADD", b"mystream", b"1-1", b"f", b"v"], b"+1-1\r\n", [b"XADD", b"mystream", b"1-1", b"f", b"v"], id="xadd"),
+        pytest.param((), [b"XADD", b"mystream", b"1-1", b"f", b"v"], b"$3\r\n1-1\r\n", [b"XADD", b"mystream", b"1-1", b"f", b"v"], id="xadd"),
         pytest.param((), [b"INCR", b"counter"], b":1\r\n", [b"INCR", b"counter"], id="incr"),
         pytest.param(([b"SET", b"key", b"value"],), [b"DEL", b"key"], b"+OK\r\n", [b"DEL", b"key"], id="del"),
         pytest.param((), [b"ZADD", b"zset_key", b"1.0", b"foo"], b":1\r\n", [b"ZADD", b"zset_key", b"1.0", b"foo"], id="zadd"),

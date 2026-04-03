@@ -3,7 +3,7 @@ from collections.abc import Sequence
 
 from app.commands import Arity, CommandContext, command
 from app.parser import RESPError
-from app.resp_types import BaseRESPType, BulkStringType, SimpleStringType, ArrayType, NullBulkStringType
+from app.resp_types import BaseRESPType, BulkStringType, NullArrayType, SimpleStringType, ArrayType, NullBulkStringType
 
 
 
@@ -104,7 +104,7 @@ async def cmd_xread(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     if entries:
         return _build_xread_response(entries)
     elif block_timeout_seconds is None:
-        return NullBulkStringType()
+        return NullArrayType()
     elif block_timeout_seconds == 0:
         while True:
             await asyncio.sleep(0.05)
@@ -119,7 +119,7 @@ async def cmd_xread(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
             if entries:
                 return _build_xread_response(entries)
         else:
-            return NullBulkStringType()
+            return NullArrayType()
 
 
 def _build_xread_response(entries):
