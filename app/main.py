@@ -79,10 +79,13 @@ async def main() -> None:
 
     if config.replicaof:
         try:
-            host, port_str = config.replicaof.split(":", 1)
+            if " " in config.replicaof:
+                host, port_str = config.replicaof.split(" ", 1)
+            else:
+                host, port_str = config.replicaof.split(":", 1)
             master_port = int(port_str)
         except (ValueError, IndexError):
-            app_state.logger.error("Error: --replicaof must be in the format host:port")
+            app_state.logger.error("Error: --replicaof must be in the format host:port or 'host port'")
             return
 
         app_state.logger.info(f"Connecting to master {host}:{master_port}")
