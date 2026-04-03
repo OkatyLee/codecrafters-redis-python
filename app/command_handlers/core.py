@@ -68,7 +68,7 @@ def _acl_getuser(ctx: CommandContext, username: bytes) -> list[bytes | list[byte
     return [
         b"flags",
         [b"nopass"] if user.nopass else [],
-        b"password",
+        b"passwords",
         [p for p in user.passwords] if len(user.passwords) > 0 else []
 
     ]
