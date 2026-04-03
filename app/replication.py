@@ -116,6 +116,7 @@ async def replication_handshake_and_loop(
             app_state.logger.error("Unexpected error during handshake")
             return
 
+        has_seen_replicated_command = False
         while True:
             data = await parser.parse()
             if data is None:
@@ -125,8 +126,12 @@ async def replication_handshake_and_loop(
 
             command = _normalize_command(data) # type: ignore
             is_getack = command[:2] == [b"REPLCONF", b"GETACK"]
-            if not is_getack:
+            if is_getack:
+                if has_seen_replicated_command:
+                    app_state.config.increment_replica_repl_offset(len(encode_command_as_resp_array(command)))
+            else:
                 app_state.config.increment_replica_repl_offset(len(encode_command_as_resp_array(command)))
+                has_seen_replicated_command = True
             exec_ctx = build_exec_ctx(
                 command,
                 app_state,
