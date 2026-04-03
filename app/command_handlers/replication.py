@@ -11,6 +11,10 @@ EMPTY_RDB_HEX = "524544495330303131fa0972656469732d76657205372e322e30fa0a7265646
 EMPTY_RDB_BYTES = bytes.fromhex(EMPTY_RDB_HEX)
 
 
+def _encode_rdb_bulk_transfer(rdb_data: bytes) -> bytes:
+    return b"$" + str(len(rdb_data)).encode() + b"\r\n" + rdb_data
+
+
 @command(
     name=b"INFO",
     arity=Arity(0, 1),
@@ -80,7 +84,7 @@ def cmd_psync(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
 
     payload = (
         SimpleStringType(f"FULLRESYNC {config.master_perlid} {config.master_repl_offset}").encode()
-        + BulkStringType(rdb_data).encode()
+        + _encode_rdb_bulk_transfer(rdb_data)
     )
     return RawResponse(payload)
 

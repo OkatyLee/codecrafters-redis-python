@@ -94,7 +94,7 @@ async def read_fullresync_and_rdb(reader: asyncio.StreamReader) -> tuple[bytes, 
     first_line = await reader.readline()
     bulk_header = await reader.readline()
     length = int(bulk_header[1:-2])
-    payload = await reader.readexactly(length + 2)
+    payload = await reader.readexactly(length)
     return first_line, bulk_header + payload
 
 
@@ -1189,6 +1189,8 @@ async def test_master_propagates_set_to_multiple_replicas():
         assert replconf_response == b"+OK\r\n"
         assert fullresync_line.startswith(b"+FULLRESYNC ")
         assert rdb_response.startswith(b"$")
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(replica_reader.read(2), timeout=0.05)
 
     set_response = await send_command_and_read_response(
         client_reader,

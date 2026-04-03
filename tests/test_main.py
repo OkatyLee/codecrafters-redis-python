@@ -109,7 +109,7 @@ async def test_replication_handshake_propagates_master_write_to_slave():
         await writer.drain()
 
         assert await parser.parse() == [b"PSYNC", b"?", b"-1"]
-        writer.write(b"+FULLRESYNC test-replid 0\r\n$0\r\n\r\n")
+        writer.write(b"+FULLRESYNC test-replid 0\r\n$0\r\n")
         await writer.drain()
 
         handshake_seen.set()
@@ -163,7 +163,7 @@ async def test_slave_write_is_not_propagated_back_to_master():
         await writer.drain()
 
         assert await parser.parse() == [b"PSYNC", b"?", b"-1"]
-        writer.write(b"+FULLRESYNC test-replid 0\r\n$0\r\n\r\n")
+        writer.write(b"+FULLRESYNC test-replid 0\r\n$0\r\n")
         await writer.drain()
 
         handshake_seen.set()
@@ -460,7 +460,7 @@ async def test_handshake_aborts_on_bad_psync_response():
 
 
 @pytest.mark.asyncio
-async def test_handshake_aborts_on_non_bytes_rdb_payload():
+async def test_handshake_aborts_on_invalid_rdb_payload():
     async def fake_master(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         parser = RESPParser(reader)
         await parser.parse()
@@ -474,7 +474,7 @@ async def test_handshake_aborts_on_non_bytes_rdb_payload():
         await writer.drain()
         await parser.parse()  # PSYNC
         writer.write(b"+FULLRESYNC test-replid 0\r\n")
-        # Send a simple string instead of bulk string (not bytes after parse)
+        # Send a RESP token instead of the raw RDB bulk transfer payload.
         writer.write(b"+not-a-bulk-string\r\n")
         await writer.drain()
         writer.close()
@@ -543,7 +543,7 @@ async def test_replica_replies_with_ack_on_getack():
         await writer.drain()
 
         assert await parser.parse() == [b"PSYNC", b"?", b"-1"]
-        writer.write(b"+FULLRESYNC test-replid 0\r\n$0\r\n\r\n")
+        writer.write(b"+FULLRESYNC test-replid 0\r\n$0\r\n")
         await writer.drain()
 
         handshake_seen.set()

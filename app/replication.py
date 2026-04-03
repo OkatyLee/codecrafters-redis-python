@@ -8,6 +8,25 @@ from app.session import ClientSession
 from app.state import AppState
 
 
+async def _read_rdb_bulk_transfer(reader: asyncio.StreamReader) -> bytes:
+    header = await reader.readline()
+    if not header.endswith(b"\r\n") or not header.startswith(b"$"):
+        raise ValueError("ERR Invalid RDB bulk transfer header")
+
+    try:
+        length = int(header[1:-2])
+    except ValueError as exc:
+        raise ValueError("ERR Invalid RDB bulk transfer length") from exc
+
+    if length < 0:
+        raise ValueError("ERR Invalid RDB bulk transfer length")
+
+    try:
+        return await reader.readexactly(length)
+    except asyncio.IncompleteReadError as exc:
+        raise ConnectionError("ERR Connection closed mid-RDB-transfer") from exc
+
+
 def _normalize_command(data: list[object]) -> list[bytes]:
     normalized = [item if isinstance(item, bytes) else str(item).encode() for item in data]
     normalized[0] = normalized[0].upper()
@@ -84,8 +103,9 @@ async def replication_handshake_and_loop(
             app_state.logger.error("Received unexpected response to PSYNC")
             return
 
-        rdb_payload = await parser.parse()
-        if not isinstance(rdb_payload, bytes):
+        try:
+            rdb_payload = await _read_rdb_bulk_transfer(reader)
+        except (ConnectionError, ValueError):
             app_state.logger.error("Received invalid RDB payload from master")
             return
 
