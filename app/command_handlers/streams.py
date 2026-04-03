@@ -43,7 +43,7 @@ def cmd_type(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
 )
 def cmd_xadd(ctx: CommandContext, args: list[bytes]) -> BaseRESPType:
     stream_key, stream_id, *payload = args
-    return BulkStringType(ctx.app_state.storage.xadd(stream_key, stream_id, payload))
+    return BulkStringType(ctx.app_state.storage.xadd(stream_key, stream_id, payload).encode())
 
 
 @command(
