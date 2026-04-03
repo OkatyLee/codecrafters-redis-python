@@ -9,6 +9,10 @@ if TYPE_CHECKING:
     from app.pubsub_client import SubscriberClient
 
 
+def encode_password_hash(password: bytes) -> bytes:
+    return sha256(password).hexdigest().encode()
+
+
 @dataclass(slots=True)
 class ACLUser:
     """
@@ -29,8 +33,9 @@ class ACLUser:
             return False
         if self.nopass:
             return True
-        hashed_password = sha256(password).digest()
-        return hashed_password in self.passwords
+        hashed_password = encode_password_hash(password)
+        legacy_hashed_password = sha256(password).digest()
+        return hashed_password in self.passwords or legacy_hashed_password in self.passwords
 
 
 @dataclass(slots=True)

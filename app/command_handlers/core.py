@@ -1,8 +1,7 @@
-from hashlib import sha256
-
 from app.commands import Arity, CommandContext, command
 from app.parser import RESPError
 from app.resp_types import ArrayType, BaseRESPType, BulkStringType, NullArrayType, SimpleStringType
+from app.session import encode_password_hash
 
 
 @command(
@@ -54,7 +53,7 @@ def _acl_setuser(ctx: CommandContext, username: bytes, password: bytes) -> str:
             raise RESPError("ERR invalid password format for 'ACL SETUSER'")
 
         user = ctx.app_state.config.ensure_acl_user(username.decode())
-        hashed_password = sha256(password[1:]).digest()
+        hashed_password = encode_password_hash(password[1:])
         user.passwords.add(hashed_password)
         user.nopass = False
         return "OK"
@@ -69,7 +68,7 @@ def _acl_getuser(ctx: CommandContext, username: bytes) -> list[bytes | list[byte
         b"flags",
         [b"nopass"] if user.nopass else [],
         b"passwords",
-        [p for p in user.passwords] if len(user.passwords) > 0 else []
+        [p.hex().encode() if len(p) == 32 else p for p in user.passwords] if len(user.passwords) > 0 else []
 
     ]
 

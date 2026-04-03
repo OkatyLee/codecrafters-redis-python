@@ -525,6 +525,33 @@ async def test_acl_getuser_with_password():
 
 
 @pytest.mark.asyncio
+async def test_acl_getuser_returns_hex_encoded_password_hash():
+    server, app_state = await start_test_server()
+    addr = server.sockets[0].getsockname()
+
+    reader, writer = await asyncio.open_connection(*addr)
+
+    await send_command_and_read_response(
+        reader, writer, b"*4\r\n$3\r\nACL\r\n$7\r\nSETUSER\r\n$7\r\ndefault\r\n$10\r\n>grape-84\r\n"
+    )
+
+    response = await send_command_and_parse_response(
+        reader, writer, b"*3\r\n$3\r\nACL\r\n$7\r\nGETUSER\r\n$7\r\ndefault\r\n"
+    )
+
+    assert isinstance(response, list)
+    password_idx = response.index(b"passwords")
+    password_list = response[password_idx + 1]
+    assert isinstance(password_list, list)
+    assert password_list == [b"ded20a66a5091164e490d2c0c9c701dac856ea4dd62180f3fc0ab9f98cda32ff"]
+
+    writer.close()
+    await writer.wait_closed()
+    server.close()
+    await server.wait_closed()
+
+
+@pytest.mark.asyncio
 async def test_acl_getuser_default_user():
     """ACL GETUSER returns info for default user."""
     server, app_state = await start_test_server()
