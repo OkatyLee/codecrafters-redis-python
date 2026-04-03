@@ -31,7 +31,7 @@ async def dispatch_command(
         return SimpleErrorType("NOAUTH  Authentication required.")
     
     if session.in_subscribed_mode and not spec.allowed_in_subscribe:
-        return SimpleErrorType("ERR Command not allowed in subscribe mode")
+        return SimpleErrorType(f"ERR Can't execute '{spec.name.decode().lower()}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context")
     
     if not spec.arity.matches(len(args)):
         return SimpleErrorType(
